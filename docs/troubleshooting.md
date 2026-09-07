@@ -1,6 +1,6 @@
 # Troubleshooting
 
-The failure modes below are silent by nature — each one presents as something
+The failure modes below are silent by nature: each one presents as something
 other than what it is. They are ordered by how often each is reported.
 
 ## The grant that stays ticked while failing (macOS)
@@ -11,7 +11,7 @@ Accessibility ticked for Voxtype.
 
 **Cause:** TCC keys a grant to the code's *designated requirement*. An ad-hoc
 signature (which `voxtype setup app-bundle` applies every run) has no stable
-requirement — its cdhash changes with every rebuild, and the old grants keep
+requirement. Its cdhash changes with every rebuild, and the old grants keep
 matching the old cdhash while the checkbox lies. This is why the installer
 re-signs the bundle with a stable self-signed certificate.
 
@@ -36,9 +36,9 @@ tccutil reset Microphone    io.voxtype.daemon
 intact), silently, forever.
 
 **Cause:** the daemon runs from Login Items, so its PATH is launchd's minimal
-`/usr/bin:/bin:/usr/sbin:/sbin` — Homebrew's `jq` (a filter dependency) and
-`~/.local/bin` are invisible. The filter's dependency guard fires and passes
-the raw text through, which is exactly its designed failure mode.
+`/usr/bin:/bin:/usr/sbin:/sbin`, and Homebrew's `jq` (a filter dependency)
+and `~/.local/bin` are invisible to it. The filter's dependency guard fires and
+passes the raw text through, which is exactly its designed failure mode.
 
 The installer patches `LSEnvironment.PATH` into the app bundle for exactly
 this (and the filter hard-codes the common Homebrew paths), but an inherited
@@ -50,13 +50,13 @@ that terminal's PATH instead. Check what the running daemon actually has:
 ps -wwE -o command -p "$(pgrep -x voxtype-bin | head -1)" | tr ' ' '\n' | grep ^PATH=
 ```
 
-Fix: restart clean — `pkill -x voxtype-bin; env -i /usr/bin/open -a Voxtype` —
+Fix: restart clean with `pkill -x voxtype-bin; env -i /usr/bin/open -a Voxtype`,
 or log out and back in (the at-login launch is the clean-environment case by
 construction).
 
 **On Linux** the same class of issue exists with the systemd user service:
 the filter is resolved by absolute path (`output.post_process.command`), but
-anything it shells out to needs the session PATH — which is why the payload
+anything it shells out to needs the session PATH, which is why the payload
 resolves its notifier by absolute path too.
 
 ## `VOXTYPE_CONTEXT` is no longer yours
@@ -66,13 +66,13 @@ effect; or "cleanup got slower" with nothing changed.
 
 **Cause:** newer voxtype builds `env_remove` `VOXTYPE_CONTEXT` and then set it
 themselves to the *previous dictation's text*. A value you export never
-arrives — and if the filter read it, a string changing every dictation would
+arrives, and if the filter read it, a string changing every dictation would
 invalidate llama.cpp's cached prompt prefix every time.
 
 **Fix:** use `VOXTYPE_CLEANUP_CONTEXT`. The installers check for the old name
 in the voxtype binary and warn (`grep -oE 'VOXTYPE_[A-Z_]+'` with a prefix
-match — Rust packs string literals together, so the exact-match check that
-named this variable wrongly in the first place misses it).
+match, because Rust packs string literals together and the exact-match check
+that named this variable wrongly in the first place misses it).
 
 ## The tap that returns silence, and noErr (macOS meeting mode)
 
@@ -80,7 +80,7 @@ named this variable wrongly in the first place misses it).
 section; `voxtype-loopback-macos --self-test` captures zeros with no error
 anywhere.
 
-**Cause:** tccd checks the **responsible app** — `Voxtype.app` — for
+**Cause:** tccd checks the **responsible app**, `Voxtype.app`, for
 `NSAudioCaptureUsageDescription` before allowing a CoreAudio process tap.
 Without the key the refusal is silent: `noErr` from every API, then all-zero
 buffers. The installer patches the key in and re-signs; running the shim from
@@ -98,7 +98,7 @@ voxtype meeting export latest --speakers       # both You and Remote sections
 
 Related tripwire: if the shim is missing from the daemon's PATH,
 `loopback_device = "auto"` logs `No monitor source found, using mic only`
-and records **your half only** — `voxtype-meeting start` refuses unless the
+and records **your half only**. `voxtype-meeting start` refuses unless the
 shim exists, and watches the daemon log for exactly that line for 3 s after
 starting, precisely so this cannot be silent.
 
@@ -106,7 +106,7 @@ starting, precisely so this cannot be silent.
 
 **That is the design, not a bug.** The filter's one rule is never to lose the
 user's words, so a down/slow/rejecting backend degrades to the raw transcript
-(a refused connection costs ~1–9 ms). To find which layer is degrading:
+(a refused connection costs 1 to 9 ms). To find which layer is degrading:
 
 ```sh
 curl -sf http://127.0.0.1:8088/health          # the server itself
@@ -118,7 +118,7 @@ VOXTYPE_CLEANUP_MIN_WORDS=1 VOXTYPE_CLEANUP_TIMEOUT=30 bash -c \
 
 On Linux, a `llama-server` that lists GPU devices but refuses every model
 with `make_cpu_buft_list: no CPU backend found` is the
-[optional-dependency trap](install-linux.md#the-llamacpp-trap) — install
+[optional-dependency trap](install-linux.md#the-llamacpp-trap); install
 `ggml-cpu`.
 
 ## Dictation cleanup got slow (Linux)
@@ -136,7 +136,7 @@ stops the unit instead of quietly parking the model on an iGPU. Re-run the
 installer (or pin `LLAMA_DEVICE`) to re-bake the guard against the new order.
 
 Also on the slow path: the first dictation after a vocabulary edit pays a
-full prompt eval (the cached prefix was invalidated — once, by design), and a
+full prompt eval (the cached prefix was invalidated once, by design), and a
 cold Mesa shader cache costs seconds of Vulkan recompilation after reboot.
 
 ## Whisper types vocabulary words nobody said
@@ -145,18 +145,19 @@ Near-silent audio plus a long `whisper.initial_prompt` is the recipe: whisper
 echoes the prompt back as if spoken. The guards: keep VAD enabled (it rejects
 the silence in the first place), keep `[misheard]` short (the installer warns
 past 40 terms), and put everything whisper merely *misspells* in
-`[misspelled]` instead — the cleanup model fixes those with neither the cap
-nor the echo risk. See [configuration](configuration.md#where-the-vocabulary-lives).
+`[misspelled]` instead, where the cleanup model fixes them with neither the
+cap nor the echo risk. See
+[configuration](configuration.md#where-the-vocabulary-lives).
 
 ## The OSD panel is blank or doubled (macOS)
 
 The macOS OSD runs as its **own** LaunchAgent reading the same
-`/tmp/voxtype/audio.sock` the daemon binds — `osd.enabled` stays `false`
-("the daemon must not spawn a frontend"), because the daemon's supervisor
+`/tmp/voxtype/audio.sock` the daemon binds. `osd.enabled` stays `false`
+("the daemon must not spawn a frontend") because the daemon's supervisor
 resolves its child inside the sealed app bundle or on a PATH that excludes
 `~/.local/bin`. A doubled panel means a second daemon holds the socket:
 usually a leftover `voxtype setup launchd` agent racing the Login Item
 (check `~/Library/LaunchAgents/io.voxtype.daemon.plist`; the installer warns
 about it). A blank panel with notifications also missing means neither
-feedback channel is alive — restore them with
+feedback channel is alive; restore them with
 `voxtype config set output.notification.on_recording_start true`.

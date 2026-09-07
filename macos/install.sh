@@ -105,6 +105,13 @@ VOXTYPE_ARTIFACT="voxtype-$VOXTYPE_VERSION-macos-universal"
 VOXTYPE_REPO="${VOXTYPE_RELEASE_REPO:-peteonrails/voxtype}"
 VOXTYPE_BASE="${VOXTYPE_RELEASE_BASE:-https://github.com/$VOXTYPE_REPO/releases/download/v$VOXTYPE_VERSION}"
 
+# Dock-icon patch (patch_bundle_dock). The address is pinned to the
+# VOXTYPE_VERSION above and MUST be re-derived when that moves -- the byte
+# check makes a stale address skip the patch instead of corrupting a binary.
+VOXTYPE_DOCK_VA=0x354530     # arm64 __TEXT, vmaddr base 0x100000000
+VOXTYPE_DOCK_FROM=02a14039   # ldrb w2, [x8, #0x28]  (word 0x3940a102)
+VOXTYPE_DOCK_TO=22008052     # mov  w2, #1           (word 0x52800022)
+
 # The signing identity that keeps the TCC grants alive across upgrades. Reused
 # if it already exists and NEVER regenerated -- a new certificate breaks every
 # grant exactly as ad-hoc signing would.
@@ -278,6 +285,81 @@ patch_bundle_meeting() {
     -string 'Voxtype records system audio during meeting transcription.' "$plist"
   plutil -lint "$plist" >/dev/null
   note "patched $plist (LSEnvironment.PATH, NSAudioCaptureUsageDescription)"
+}
+
+# Stop the daemon taking a Dock tile. Same ordering rule as
+# patch_bundle_meeting: after `voxtype setup app-bundle`, before sign_bundle.
+#
+# Upstream ALREADY asks for this -- the generated Info.plist carries
+# LSUIElement=true -- but the ask is overridden at runtime. voxtype links
+# tao 0.32.8 (with tray-icon/muda, for the menu bar item), and tao calls
+# -[NSApplication setActivationPolicy:] itself at applicationDidFinishLaunching
+# using its builder default, ActivationPolicy::Regular. A policy set from code
+# beats LSUIElement, so the tile comes back on every launch. There is no config
+# key for it (`voxtype config schema` has none) and 1.0.1 is current, so the
+# only local fix is the one instruction that feeds that call:
+#
+#   0x354530   ldrb w2, [x8, #0x28]   ->   mov w2, #1     # 1 = Accessory
+#
+# Both the fast path and the lazy sel_registerName path funnel through the same
+# w2, so one word covers both. arm64 slice only -- the tile is a desktop
+# concern and nothing here runs the x86_64 half.
+#
+# Safe for the grants, and for the same reason the certificate exists: the
+# designated requirement is `identifier "io.voxtype.daemon" and certificate
+# leaf = H"..."`, which a changed cdhash does not affect. sign_bundle reseals
+# it two blocks below.
+#
+# No backup is kept: `voxtype setup app-bundle` rewrites the binary from
+# $BIN/voxtype, so re-running it (then this script, to restore the identity)
+# is the way back to a Dock icon.
+#
+# RETIRE THIS, do not re-derive it. Upstream PR #554 (ivancis1,
+# `macos-fix-dock-icon`) is this same fix in Rust: menubar.rs calling
+# set_activation_policy(Accessory) on the event loop before run(). It still
+# applies cleanly to dev, and the one red CI job blocking it was an unrelated
+# clippy useless-format in src/tui/compositor_bindings.rs that dev has since
+# fixed in 71db5a0, so it is a rebase from green. When VOXTYPE_VERSION next
+# moves, check the new binary for the fix rather than chasing the address:
+#
+#   lsappinfo list | grep -A4 '"Voxtype"'   # UIElement on a stock bundle = landed
+#
+# If it landed, delete this function and its call site.
+patch_bundle_dock() {
+  local bin="$APP/Contents/MacOS/voxtype-bin" slice cur off
+  [[ -f $bin ]] || return 0
+
+  # Derive the fat-slice offset rather than pinning it; a thin arm64 build
+  # prints no fat header and correctly falls through to 0.
+  slice=$(otool -f -arch arm64 "$bin" 2>/dev/null |
+          awk '/cputype 16777228/{f=1} f && /^ *offset /{print $2; exit}')
+  off=$(( ${slice:-0} + VOXTYPE_DOCK_VA ))
+
+  cur=$(xxd -s "$off" -l 4 -p "$bin" 2>/dev/null || true)
+  case "$cur" in
+    "$VOXTYPE_DOCK_TO")
+      note "dock patch already applied"; return 0 ;;
+    "$VOXTYPE_DOCK_FROM")
+      ;;
+    *)
+      # Not fatal: a Dock icon is cosmetic, and refusing beats writing four
+      # bytes into the middle of an unknown instruction.
+      warn "dock patch SKIPPED: $bin+$off is '$cur', expected '$VOXTYPE_DOCK_FROM'."
+      warn "  voxtype is probably no longer $VOXTYPE_VERSION. FIRST check whether"
+      warn "  upstream PR #554 landed and this patch is now dead weight:"
+      warn "    lsappinfo list | grep -A4 '\"Voxtype\"'   # UIElement = landed, drop it"
+      warn "  Only if it still says Foreground, re-derive the address with:"
+      warn "    otool -tvV -arch arm64 '$bin' | grep -B8 'setActivationPolicy'"
+      warn "  and update VOXTYPE_DOCK_VA. Voxtype keeps its Dock icon until then."
+      return 0 ;;
+  esac
+
+  if (( DRY_RUN )); then
+    note "[dry] patch $bin+$off: ldrb w2,[x8,#0x28] -> mov w2,#1 (Accessory)"
+    return 0
+  fi
+  printf '\x22\x00\x80\x52' | dd of="$bin" bs=1 seek="$off" conv=notrunc status=none
+  note "patched $bin+$off (activation policy -> Accessory, no Dock tile)"
 }
 
 # Strip the meeting keys again (--uninstall). Best-effort and self-detecting:
@@ -526,6 +608,16 @@ else
   if [[ -d $APP ]] && (( HAVE_MEETING )) &&
      security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CERT_CN"; then
     patch_bundle_meeting
+  fi
+
+  # Unconditional, unlike the meeting patch: the Dock tile is not a feature
+  # anyone opted into, it is upstream's LSUIElement=true losing to tao. Gated
+  # on the identity for the same reason patch_bundle_meeting is -- an edited
+  # binary under upstream's ad-hoc signature is a broken bundle unless the
+  # sign_bundle below actually runs.
+  if [[ -d $APP ]] &&
+     security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CERT_CN"; then
+    patch_bundle_dock
   fi
 
   # Replace the ad-hoc signature upstream just applied with the stable one.

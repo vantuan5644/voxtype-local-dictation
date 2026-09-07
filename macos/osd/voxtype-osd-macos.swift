@@ -1398,10 +1398,269 @@ enum Probe {
   }
 }
 
+// MARK: - Render
+//
+// Write one panel frame to a PNG through the same OSDView.draw() the live
+// panel uses, so a picture in the docs cannot quietly drift from what the
+// renderer actually paints.
+//
+// No window, no socket, and no NSApplication: an NSBitmapImageRep is the
+// only drawing surface, which is what lets this run beside --selftest on a
+// terminal-less CI runner. The panel is drawn at its configured point size
+// and scaled up by --render-scale, the same way a Retina display samples it.
+//
+// The frames are synthetic and DETERMINISTIC, for two reasons. A capture of
+// real dictation would carry whatever the microphone happened to hear into a
+// public repository; and a fixed seed means regenerating the images produces
+// byte-identical files rather than a diff on every run.
+
+enum Render {
+  /// The two states worth a picture. `idle` is not one of them: the live
+  /// panel is ordered out entirely when the daemon goes idle, so its honest
+  /// screenshot is an empty desktop.
+  static let states = ["recording", "transcribing"]
+
+  /// A 64-bit LCG (Numerical Recipes constants). Not for anything that
+  /// matters -- it exists so the waveform is reproducible across machines,
+  /// which SystemRandomNumberGenerator explicitly is not.
+  private struct LCG {
+    var state: UInt64
+    /// Next value in 0..<1, taken from the high bits: the low bits of an LCG
+    /// have short periods, and the lowest bit of this one simply alternates.
+    mutating func unit() -> Float {
+      state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+      return Float(state >> 40) / Float(1 << 24)
+    }
+  }
+
+  /// `count` frames of plausible speech: a syllabic envelope filled with
+  /// noise, at the amplitudes a real microphone produces -- loudest peaks
+  /// near 0.10 linear, about -20 dBFS, which lands the meter in its green
+  /// zone rather than pinned and leaves the waveform just short of the
+  /// clamp. The waveform is drawn with gain 10 by default, which is why
+  /// these numbers look small next to a full-scale +-1.
+  static func syntheticFrames(count: Int, seed: UInt64) -> [AudioFrame] {
+    var rng = LCG(state: seed &* 2_862_933_555_777_941_757 &+ 3_037_000_493)
+    var out = [AudioFrame]()
+    out.reserveCapacity(count)
+    for i in 0..<count {
+      let t = Float(i) / 100.0  // the daemon's frame rate, 100 Hz
+      // Two detuned syllable rates beating against each other, so the
+      // envelope does not repeat visibly across a 3 s window.
+      let syllable = (sinf(t * 2 * .pi * 3.1) * 0.5 + 0.5) * (sinf(t * 2 * .pi * 0.7) * 0.35 + 0.65)
+      // A breath: one gap in the middle, where a speaker would pause.
+      let gap: Float = (t > 1.32 && t < 1.55) ? 0.05 : 1.0
+      let envelope = syllable * gap
+      let amp = (0.010 + envelope * 0.072) * (0.75 + rng.unit() * 0.5)
+      // min/max are not symmetric in real speech; skew them slightly.
+      let mx = amp * (0.85 + rng.unit() * 0.3)
+      let mn = -amp * (0.85 + rng.unit() * 0.3)
+      let linear = Swift.max(abs(mn), abs(mx))
+      let peak = linear > 0 ? 20 * log10f(linear) : -120
+      out.append(AudioFrame(seq: UInt32(i), min: mn, max: mx, peakDbfs: peak))
+    }
+    return out
+  }
+
+  /// Parse `#rrggbb` / `rrggbb` into a CGColor. Returns nil for "none".
+  static func parseBackdrop(_ spec: String) -> CGColor?? {
+    let s = spec.trimmingCharacters(in: .whitespaces).lowercased()
+    if s == "none" || s.isEmpty { return .some(nil) }
+    let hex = s.hasPrefix("#") ? String(s.dropFirst()) : s
+    guard hex.count == 6, let v = UInt32(hex, radix: 16) else { return nil }
+    return CGColor(
+      red: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+      blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+  }
+
+  /// Load a PNG back as the same RGBA8 bitmap the renderer wrote.
+  private static func loadRep(_ path: String) -> NSBitmapImageRep? {
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    return NSBitmapImageRep(data: data)
+  }
+
+  /// The region the `transcribing` label occupies, in pixels, generously
+  /// oversized: the centre 60% x 60% of the waveform area.
+  ///
+  /// Deliberately a fixed fraction rather than the text's measured bounds.
+  /// The whole reason this rect exists is that font metrics are NOT stable
+  /// across macOS versions, so a box derived from `text.size()` would be a
+  /// different box on the machine it is meant to reconcile with. The label is
+  /// ~94 x 14 pt inside a 376 x 48 pt waveform area; this rect is more than
+  /// twice that in each direction.
+  static func labelRect(cfg: Config, scale: Double, pad: Double) -> (
+    x0: Int, y0: Int, x1: Int, y1: Int
+  ) {
+    let meterW = Swift.max(cfg.widthPx * 0.05, 8)
+    let waveformW = cfg.widthPx - meterW - 4
+    let bw = waveformW * 0.6, bh = cfg.heightPx * 0.6
+    let x0 = pad + (waveformW - bw) / 2, y0 = pad + (cfg.heightPx - bh) / 2
+    return (
+      Int((x0 * scale).rounded(.down)), Int((y0 * scale).rounded(.down)),
+      Int(((x0 + bw) * scale).rounded(.up)), Int(((y0 + bh) * scale).rounded(.up))
+    )
+  }
+
+  /// Percentage of pixels that differ between two rendered PNGs, or nil when
+  /// they are not even the same shape.
+  ///
+  /// `ignore` masks out a rectangle. It exists for exactly one reason: the
+  /// `transcribing` frame draws a label with the system monospaced font, and
+  /// glyph rasterisation is not stable across macOS versions, so CI on
+  /// macos-15 and a developer on a newer release disagree on that text while
+  /// drawing the same picture. Everything outside the rect still compares
+  /// EXACTLY, which is what keeps the check worth running: a global
+  /// percentage threshold would have to be set so loose to absorb the font
+  /// that an entirely different waveform slips under it (measured: a new seed
+  /// moves only 6.8% of this frame, less than the label can).
+  static func diffPercent(
+    _ pathA: String, _ pathB: String,
+    ignore: (x0: Int, y0: Int, x1: Int, y1: Int)? = nil
+  ) -> Double? {
+    guard let a = loadRep(pathA), let b = loadRep(pathB),
+      a.pixelsWide == b.pixelsWide, a.pixelsHigh == b.pixelsHigh,
+      a.samplesPerPixel == b.samplesPerPixel,
+      let da = a.bitmapData, let db = b.bitmapData
+    else { return nil }
+
+    let spp = a.samplesPerPixel
+    let w = a.pixelsWide, h = a.pixelsHigh
+    var differing = 0
+    var compared = 0
+    for y in 0..<h {
+      let rowA = da + y * a.bytesPerRow
+      let rowB = db + y * b.bytesPerRow
+      for x in 0..<w {
+        if let r = ignore, x >= r.x0, x < r.x1, y >= r.y0, y < r.y1 { continue }
+        compared += 1
+        let off = x * spp
+        for c in 0..<spp where rowA[off + c] != rowB[off + c] {
+          differing += 1
+          break
+        }
+      }
+    }
+    guard compared > 0 else { return nil }
+    return 100.0 * Double(differing) / Double(compared)
+  }
+
+  static func run(
+    path: String, state: String, scale: Double, pad: Double, backdrop: String, seed: UInt64,
+    compareTo: String?, maxDiffPct: Double, ignoreLabel: Bool, cfg: Config
+  ) -> Int32 {
+    let mode: DrawMode
+    switch state {
+    case "recording": mode = .live
+    case "transcribing": mode = .transcribing
+    default:
+      FileHandle.standardError.write(
+        "voxtype-osd-macos: unknown --render-state \(state); expected one of \(states.joined(separator: ", "))\n"
+          .data(using: .utf8)!)
+      return 2
+    }
+    guard let maybeBackdrop = parseBackdrop(backdrop) else {
+      FileHandle.standardError.write(
+        "voxtype-osd-macos: --render-bg wants #rrggbb or none, got \(backdrop)\n".data(using: .utf8)!
+      )
+      return 2
+    }
+
+    // Exactly the numbers OSDController.renderNow() computes, so the picture
+    // is the live panel's and not an approximation of it.
+    let frames = syntheticFrames(count: Int((cfg.waveformWindowSecs * 100).rounded()), seed: seed)
+    var hold = PeakHold(decayDbPerSec: Float(cfg.peakDecayDbPerSec))
+    for f in frames { hold.update(currentPeakDbfs: f.peakDbfs, dtSecs: 0.01) }
+    let meterW = Swift.max(cfg.widthPx * 0.05, 8)
+    let waveformW = cfg.widthPx - meterW - 4
+    let nColumns = Swift.max(Int(waveformW.rounded()), 32)
+
+    let view = OSDView(frame: NSRect(x: 0, y: 0, width: cfg.widthPx, height: cfg.heightPx))
+    view.render = RenderState(
+      columns: projectEnvelope(frames, nColumns: nColumns),
+      peakDbfs: frames.last?.peakDbfs ?? -120,
+      heldDbfs: hold.heldDbfs,
+      mode: mode,
+      gain: Float(cfg.waveformGain),
+      opacity: Float(cfg.opacity))
+
+    let ptW = cfg.widthPx + pad * 2
+    let ptH = cfg.heightPx + pad * 2
+    let pxW = Int((ptW * scale).rounded())
+    let pxH = Int((ptH * scale).rounded())
+    guard pxW > 0, pxH > 0,
+      let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: pxW, pixelsHigh: pxH, bitsPerSample: 8,
+        samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+        bytesPerRow: 0, bitsPerPixel: 0)
+    else {
+      FileHandle.standardError.write(
+        "voxtype-osd-macos: cannot allocate a \(pxW)x\(pxH) bitmap\n".data(using: .utf8)!)
+      return 1
+    }
+    // Point size on a larger pixel grid: NSGraphicsContext derives the scale
+    // transform from the ratio, so every coordinate below stays in points.
+    rep.size = NSSize(width: ptW, height: ptH)
+    guard let gctx = NSGraphicsContext(bitmapImageRep: rep) else {
+      FileHandle.standardError.write(
+        "voxtype-osd-macos: cannot make a drawing context\n".data(using: .utf8)!)
+      return 1
+    }
+
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = gctx
+    let ctx = gctx.cgContext
+    if let bg = maybeBackdrop {
+      ctx.setFillColor(bg)
+      ctx.fill(CGRect(x: 0, y: 0, width: ptW, height: ptH))
+    }
+    // The panel is translucent by design; drawing it onto the padded canvas
+    // rather than into its own bitmap is what lets the backdrop show through
+    // it the way a desktop does.
+    ctx.saveGState()
+    ctx.translateBy(x: pad, y: pad)
+    view.draw(view.bounds)
+    ctx.restoreGState()
+    gctx.flushGraphics()
+    NSGraphicsContext.restoreGraphicsState()
+
+    guard let png = rep.representation(using: .png, properties: [:]) else {
+      FileHandle.standardError.write("voxtype-osd-macos: PNG encoding failed\n".data(using: .utf8)!)
+      return 1
+    }
+    do {
+      try png.write(to: URL(fileURLWithPath: path))
+    } catch {
+      FileHandle.standardError.write(
+        "voxtype-osd-macos: cannot write \(path): \(error.localizedDescription)\n".data(
+          using: .utf8)!)
+      return 1
+    }
+    print("render: \(state) -> \(path) (\(pxW)x\(pxH) px, \(Int(scale))x)")
+
+    guard let reference = compareTo else { return 0 }
+    let ignore = ignoreLabel ? labelRect(cfg: cfg, scale: scale, pad: pad) : nil
+    guard let pct = diffPercent(path, reference, ignore: ignore) else {
+      FileHandle.standardError.write(
+        "voxtype-osd-macos: cannot compare \(path) with \(reference) (missing, unreadable, or a different size)\n"
+          .data(using: .utf8)!)
+      return 1
+    }
+    let verdict = pct <= maxDiffPct ? "ok" : "STALE"
+    let scope = ignore == nil ? "whole frame" : "label region excluded"
+    print(
+      String(
+        format: "compare: %@ %.4f%% of pixels differ from %@ (%@, allowed %.4f%%)", verdict, pct,
+        reference, scope, maxDiffPct))
+    return pct <= maxDiffPct ? 0 : 1
+  }
+}
+
 // MARK: - Argument parsing and main
 
 enum RunMode {
   case run, selftest, probe(secs: Double), help
+  /// Draw one frame into a PNG and exit; see the Render section.
+  case render(path: String)
 }
 
 func parseArgs(_ args: [String]) -> (mode: RunMode, flags: [String: String], error: String?) {
@@ -1410,12 +1669,22 @@ func parseArgs(_ args: [String]) -> (mode: RunMode, flags: [String: String], err
   let valued = [
     "config", "socket", "reconnect-secs", "width-px", "height-px", "opacity", "waveform-gain",
     "top-margin", "log-every",
+    // --render takes its output path the same way, but also selects a
+    // mode, so it is handled separately below.
+    "render-state", "render-scale", "render-pad", "render-bg", "render-seed",
+    "render-compare", "render-max-diff",
   ]
   var i = 0
   while i < args.count {
     let arg = args[i]
     if arg == "--selftest" {
       mode = .selftest
+    } else if arg == "--render" {
+      guard i + 1 < args.count else { return (mode, flags, "missing value for --render") }
+      mode = .render(path: args[i + 1])
+      i += 1
+    } else if arg == "--render-ignore-label" {
+      flags["render-ignore-label"] = "1"
     } else if arg == "--probe" {
       // Optional value: `--probe 3` or bare `--probe`.
       var secs = 10.0
@@ -1451,6 +1720,8 @@ let usage = """
     --selftest        run the ported-math unit checks; no GUI, no socket
     --probe [secs]    print decoded audio frames as text; no window
                       (default 10 s)
+    --render <png>    draw one frame to a PNG from synthetic, deterministic
+                      audio and exit; no window, no socket (docs images)
 
   Flags (defaults come from ~/.config/voxtype/config.toml [osd], then
   VOXTYPE_OSD_* env vars, then these):
@@ -1464,6 +1735,23 @@ let usage = """
     --opacity <f>              background opacity 0..1 [VOXTYPE_OSD_OPACITY]
     --waveform-gain <f>        waveform visual gain  [VOXTYPE_OSD_GAIN]
     --log-every <n>            log frame rate every N frames (0 = quiet)
+
+  Flags for --render only:
+    --render-state <s>         recording | transcribing   [recording]
+    --render-scale <n>         pixels per point, as a Retina display samples
+                               the panel [2]
+    --render-pad <pt>          transparent/backdrop margin around the panel [0]
+    --render-bg <#rrggbb|none> fill behind the translucent panel [none]
+    --render-seed <n>          waveform seed; same seed, same pixels [1]
+    --render-compare <png>     after rendering, compare against this file and
+                               exit non-zero if they differ by more than
+                               --render-max-diff
+    --render-max-diff <pct>    percentage of compared pixels allowed to
+                               differ [0]
+    --render-ignore-label      exclude the transcribing label's region from
+                               the comparison. System font rasterisation is
+                               not stable across macOS versions; the rest of
+                               the panel is, and still compares exactly
 
   NOTE: [osd] enabled is deliberately ignored by this binary -- on macOS
   `false` is what keeps the daemon from spawning a (nonexistent) frontend
@@ -1488,6 +1776,18 @@ func main() -> Int32 {
     return Selftest.run()
   case .probe(let secs):
     return Probe.run(secs: secs, cfg: Config.load(flagOverrides: flags))
+  case .render(let path):
+    return Render.run(
+      path: path,
+      state: flags["render-state"] ?? "recording",
+      scale: Double(flags["render-scale"] ?? "") ?? 2,
+      pad: Double(flags["render-pad"] ?? "") ?? 0,
+      backdrop: flags["render-bg"] ?? "none",
+      seed: UInt64(flags["render-seed"] ?? "") ?? 1,
+      compareTo: flags["render-compare"],
+      maxDiffPct: Double(flags["render-max-diff"] ?? "") ?? 0,
+      ignoreLabel: flags["render-ignore-label"] == "1",
+      cfg: Config.load(flagOverrides: flags))
   case .run:
     let cfg = Config.load(flagOverrides: flags)
     let app = NSApplication.shared
