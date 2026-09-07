@@ -880,8 +880,15 @@ else
         elif "$BIN/voxtype" config set "$key" "$want" >/dev/null 2>&1; then
           note "set        $key (was ${have:-unset})"
           voxtype_changed=1
-        elif "$BIN/voxtype" config 2>/dev/null |
-             grep -Eq "^ *${key##*.} *= *\"?${want}\"?$"; then
+        # A here-string rather than a pipe, and that is load-bearing: `grep -q`
+        # exits at its first match and closes the pipe under it, `voxtype
+        # config` then dies of SIGPIPE, and `set -o pipefail` turns that into a
+        # failed pipeline -- so the arm meant to recognise an already-correct
+        # default never fires and warns on every run instead. Reproduced here
+        # (exit 141). It is a race on output small enough to fit the pipe
+        # buffer, which is why it can look fine for a while.
+        elif grep -Eq "^ *${key##*.} *= *\"?${want}\"?$" \
+                  <<<"$("$BIN/voxtype" config 2>/dev/null || true)"; then
           # Not every schema key is settable: meeting.diarization.backend is
           # readable in the resolved dump and rejected by both `config get`
           # and `config set`. Checking the RESOLVED config rather than

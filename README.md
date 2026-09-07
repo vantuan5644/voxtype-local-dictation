@@ -46,9 +46,12 @@ a desktop 4090, about 950 ms on an M1 Pro laptop. The same job through
 
 Every failure path in the filter prints your original transcript unchanged:
 backend down, timed out, non-zero exit, empty answer, or an answer that grew,
-shrank, or dropped content words. Three structural guards check the model's
-reply before it is allowed to replace anything you said, so the worst thing a
-confused model can do to you is leave the text reading like raw whisper.
+shrank, dropped content words, or added words you never said. Four structural
+guards check the model's reply before it is allowed to replace anything you
+said, so the worst thing a confused model can do to you is leave the text
+reading like raw whisper. The fourth is the mechanical form of "never add":
+the answer may not contain more words than it was given, which is what stops a
+model repairing your grammar with words of its own.
 
 ### An on-screen display for macOS
 
@@ -68,6 +71,13 @@ people in the call. `voxtype-meeting start` refuses before recording if the
 shim is missing, then watches the daemon log for three seconds after starting,
 because a meeting that silently records only your own half is worse than one
 that refuses to start.
+
+Both platforms run that preflight against whatever supplies the remote side —
+the shim on macOS, a PipeWire `.monitor` source on Linux — and on both,
+`stop` waits for the daemon to finalise the record before reporting the
+meeting saved, since `voxtype meeting stop` returns while the last chunk is
+still being transcribed and a summary chained onto a stop would otherwise
+export an empty transcript.
 
 ### Meeting summaries
 
