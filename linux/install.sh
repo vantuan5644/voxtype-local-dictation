@@ -32,7 +32,9 @@
 #                  (e.g. Vulkan0). Default: the first Vulkan device, then
 #                  the first CUDA device; none enumerated means CPU.
 #   LLAMA_MODEL    path to the cleanup GGUF (default: Qwen3-4B-Instruct-2507
-#                  Q8_0 under ~/.local/share/models).
+#                  Q4_K_M under ~/.local/share/models -- the same quantisation
+#                  the macOS twin defaults to; measured FASTER here than Q8_0,
+#                  124 ms against 145 ms at the median, and it edits less).
 set -euo pipefail
 
 DRY_RUN=0 UNINSTALL=0
@@ -54,7 +56,7 @@ BIN="$HOME/.local/bin"
 CONF_DIR="$HOME/.config/voxtype"
 UNITS="$HOME/.config/systemd/user"
 MODELS="$HOME/.local/share/models"
-LLAMA_MODEL="${LLAMA_MODEL:-$MODELS/Qwen3-4B-Instruct-2507-Q8_0.gguf}"
+LLAMA_MODEL="${LLAMA_MODEL:-$MODELS/Qwen3-4B-Instruct-2507-Q4_K_M.gguf}"
 UNIT_NAME=llama-server.service
 
 # voxtype-cleanup and voxtype-meeting sit beside this script in the release
@@ -277,8 +279,10 @@ if (( ! HAVE_VOXTYPE )); then
   note "skipped: voxtype is not on PATH"
 else
   if (( DRY_RUN )); then
-    note "[dry] assert 15 config keys: hotkey, language, VAD, meeting, audio,"
+    note "[dry] assert 19 config keys: hotkey, language, VAD, meeting, audio,"
     note "     notifications, initial_prompt, post_process.command"
+    note "[dry] meeting keys: loopback_device=auto, echo_cancel=auto,"
+    note "     diarization.enabled=true, diarization.backend=simple"
     note "[dry] report-only: output.post_process.timeout_ms"
   else
     # Only the keys this setup owns, get -> compare -> set. voxtype rewrites
@@ -345,6 +349,43 @@ else
         warn "voxtype rejected '$key'; check \`voxtype config schema\` against docs/configuration.md"
       fi
     done
+    # The meeting-only keys, asserted the same way and for the same reasons
+    # as on the macOS twin, with one extra arm. echo_cancel=auto deliberately
+    # stays: a build without the onnx-common feature degrades to
+    # transcript-level dedup (the binary says so itself) and an ONNX-enabled
+    # one picks GTCRN up with no config change. Keys `config set` rejects
+    # fall back to the timeout_ms pattern -- report-only -- except that the
+    # grep is of the RESOLVED config rather than config.toml: a settable-
+    # looking key like meeting.diarization.backend is readable in the dump
+    # and rejected by `config set`, and config.toml carries no
+    # [meeting.diarization] section at all, so grepping the FILE would warn
+    # on every run about a value that is already correct by default.
+    for pair in meeting.audio.loopback_device=auto \
+                meeting.audio.echo_cancel=auto \
+                meeting.diarization.enabled=true \
+                meeting.diarization.backend=simple; do
+      key="${pair%%=*}"; want="${pair#*=}"
+      have="$(voxtype config get "$key" 2>/dev/null || true)"
+      if [[ $have == "$want" ]]; then
+        note "unchanged  $key"
+      elif voxtype config set "$key" "$want" >/dev/null 2>&1; then
+        note "set        $key (was ${have:-unset})"
+        voxtype_changed=1
+      # A here-string rather than a pipe, and that is load-bearing: `grep -q`
+      # exits at its first match and closes the pipe under it, `voxtype
+      # config` then dies of SIGPIPE, and `set -o pipefail` turns that into a
+      # failed pipeline -- so the arm meant to recognise an already-correct
+      # default never fires and warns on every run instead. Reproduced here
+      # (exit 141). It is a race on output small enough to fit the pipe
+      # buffer, which is why it can look fine for a while.
+      elif grep -Eq "^ *${key##*.} *= *\"?${want}\"?$" \
+                <<<"$(voxtype config 2>/dev/null || true)"; then
+        note "default    $key (not settable; resolved value is already $want)"
+      else
+        warn "voxtype rejected '$key' and its resolved value is not $want;"
+        warn "  add it by hand (see docs/install-linux.md, meeting mode)"
+      fi
+    done
     # output.post_process.timeout_ms is a real config field but is absent
     # from `voxtype config schema`, so `config set` rejects it and this can
     # only report. It has to stay far longer than voxtype-cleanup's own
@@ -374,9 +415,9 @@ fi
 say "Phase 5: model downloads (reported, never performed)"
 if [[ ! -f $LLAMA_MODEL ]]; then
   warn "cleanup model missing: $LLAMA_MODEL"
-  warn "  hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q8_0.gguf \\"
+  warn "  hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q4_K_M.gguf \\"
   warn "     --local-dir ~/.local/share/models"
-  warn "  (Q4_K_M is ~2.5 GB against Q8's ~4.3 GB; see docs/configuration.md)"
+  warn "  (~2.5 GB; Q8_0 at ~4.3 GB was the old default and measured slower)"
   warn "then: systemctl --user enable --now $UNIT_NAME"
 else
   note "cleanup model present: $LLAMA_MODEL"

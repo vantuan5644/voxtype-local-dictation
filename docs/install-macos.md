@@ -23,7 +23,7 @@ two Swift sources, and Homebrew.
 | File | Installed to | Role |
 |---|---|---|
 | `voxtype` (upstream binary) | `~/.local/bin/` | the daemon; SHA256-verified from the upstream release |
-| `voxtype-cleanup` | `~/.local/bin/` | post-processor: three structural guards, few-shot prompt, `local`/`claude`/`codex`/`openai`/`off` backends |
+| `voxtype-cleanup` | `~/.local/bin/` | post-processor: four structural guards, few-shot prompt, `local`/`claude`/`codex`/`openai`/`off` backends |
 | `voxtype-notify` | `~/.local/bin/` | notification shim: terminal-notifier → osascript → silence |
 | `llama-server-run` | `~/.local/bin/` | preflight (model present, Metal present) + exec for llama-server |
 | `voxtype-meeting` | `~/.local/bin/` (`--with-meeting`) | meeting toggle wrapper + `export` + `summarize` (ordered backend chain, `codex,claude,local` by default; `local` only ever last) |

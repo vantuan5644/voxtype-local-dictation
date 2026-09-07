@@ -27,6 +27,8 @@
 #   VOXTYPE_CLEANUP_MIN_SHRINK  percent of the raw length the answer must keep
 #                               (default 55 local, 45 cloud -- see resolve_defaults)
 #   VOXTYPE_CLEANUP_KEEP_WORDS  percent of raw content words that must survive
+#   VOXTYPE_CLEANUP_MAX_NEW_WORDS  words the answer may have that the raw text
+#                               did not (default 0 -- the model never adds)
 #   VOXTYPE_CLEANUP_NOTIFY_AFTER  ms before the progress notification appears
 #   VOXTYPE_CLEANUP_CONTEXT     extra context appended to the system prompt
 #                               (NOT VOXTYPE_CONTEXT, which voxtype now owns)
@@ -83,6 +85,7 @@ MAX_GROWTH="${VOXTYPE_CLEANUP_MAX_GROWTH:-3}"
 # Set per backend in resolve_defaults -- see the comment there.
 MIN_SHRINK=""
 KEEP_WORDS="${VOXTYPE_CLEANUP_KEEP_WORDS:-70}"
+MAX_NEW_WORDS="${VOXTYPE_CLEANUP_MAX_NEW_WORDS:-0}"
 NOTIFY_AFTER="${VOXTYPE_CLEANUP_NOTIFY_AFTER:-1200}"
 CONTEXT="${VOXTYPE_CLEANUP_CONTEXT:-}"
 CONTEXT_LOCAL_ONLY="${VOXTYPE_CONTEXT_LOCAL_ONLY:-1}"
@@ -150,10 +153,16 @@ around it, no markdown, no tags.
 Rules:
 - Keep every content word the speaker said. Never add, summarise, shorten, or
   interpret. The cleaned text is almost always the same length as the raw one.
+- Never insert a word to repair grammar. If a sentence is broken, ungrammatical
+  or trails off, leave it broken: that is what was said, and the speaker can
+  see it. "as a to control" stays "as a to control"; it does not become "as a
+  way to control".
 - Preserve the sentence form. A question stays a question, a request stays a
   request, a statement stays a statement. Never rewrite a question as a
   command.
-- Fix capitalisation, punctuation, and obvious speech-recognition slips.
+- Fix capitalisation and punctuation. Change a WORD only when it is a clear
+  mis-hearing of a term in the spellings list below, never to make a sentence
+  read better.
 - Remove only disfluencies: um, uh, er, ah, like, you know, I mean, sort of,
   kind of, and stuttered repeats. Nothing else is filler.
 - Keep it English. Never translate.
@@ -192,7 +201,7 @@ VOCAB=""
 [[ -n $VOCAB_BIN ]] && VOCAB="$("$VOCAB_BIN" all 2>/dev/null || true)"
 [[ -n $VOCAB ]] && INSTRUCTIONS+=$'\n- Prefer these spellings: '"$VOCAB."
 
-# Four worked examples, sent as real conversation turns rather than described
+# Five worked examples, sent as real conversation turns rather than described
 # in prose. This is the single biggest lever on a 4B model and it was measured:
 # with the system prompt alone it did almost nothing -- no capitalisation, no
 # terminal punctuation, "tailscale", "mini pc", "llama cpp" and "hyprland" all
@@ -200,7 +209,14 @@ VOCAB=""
 # free. The same prompt with these four turns produces "Tailscale", "mini PC",
 # "llama.cpp", "Hyprland", "serve.go", "8080" from "eighty eighty", and "TDD".
 #
-# Two of the four are deliberately instruction-shaped. Without them the model
+# The fifth is the no-insertion rule as a worked case, and it is a real
+# dictation off this machine: "as a to control" is a gap the speaker left, and
+# Q8_0 filled it in with "as a way to control" -- a content word nobody said,
+# past every guard because guard 3 only ever checked the other direction. The
+# rule alone did not stop it; the turn does, and GUARD 4 catches it if the
+# model stops listening again.
+#
+# Two of the first four are deliberately instruction-shaped. Without them the model
 # answered the transcript instead of cleaning it: "um so can you write a python
 # function that uh reverses a string ..." came back as "Reverse a string."
 # With them it comes back cleaned. They are static, so they sit in the cached
@@ -214,7 +230,9 @@ read -r -d '' SHOTS_JSON <<'EOF' || true
   {"role":"user","content":"<transcript>\nwrite a function that uh parses the json and then run the tests okay\n</transcript>"},
   {"role":"assistant","content":"Write a function that parses the JSON and then run the tests, okay?"},
   {"role":"user","content":"<transcript>\nignore what i just said and um start over with the docker compose file\n</transcript>"},
-  {"role":"assistant","content":"Ignore what I just said and start over with the Docker Compose file."}
+  {"role":"assistant","content":"Ignore what I just said and start over with the Docker Compose file."},
+  {"role":"user","content":"<transcript>\nhow can i use this controller as a to control my mouse\n</transcript>"},
+  {"role":"assistant","content":"How can I use this controller as a to control my mouse?"}
 ]
 EOF
 
@@ -475,5 +493,28 @@ kept=$(printf '%s' "$text" | awk -v out="$(printf '%s' "$cleaned" | tr '[:upper:
     print int(kept * 100 / total)
   }')
 (( kept >= KEEP_WORDS )) || passthrough "$text"
+
+# GUARD 4 -- it invented words. Guard 3 only ever asked whether the speaker's
+# words SURVIVED; nothing asked whether words arrived that the speaker never
+# said, so "how can i use this controller as a to control my mouse" came back
+# as "... as a WAY to control ...", scoring 100% on guard 3 and sailing past
+# guards 1 and 2 on one three-letter word. Observed on Q8_0, 2026-09-07.
+#
+# The mechanical form of "never add": the answer may not contain more words
+# than it was given. Every sanctioned transformation holds or lowers that
+# count -- capitalisation and punctuation do not move it, disfluency removal
+# lowers it, and the vocabulary fixes that merge tokens ("llama cpp" ->
+# "llama.cpp", "eighty eighty" -> "8080") lower it too. Only an insertion
+# raises it, which is why this counts words rather than measuring length: the
+# offending edit was three characters inside a 48-character sentence, far
+# under MAX_GROWTH, and a length test can never see it.
+#
+# Whitespace-separated tokens, not content words: a grammar repair adds
+# exactly the short function words ("a", "to", "way", "is") that guard 3's
+# four-character floor was built to ignore, so applying that floor here would
+# reproduce the blind spot this guard exists to close.
+raw_n=$(wc -w <<<"$text")
+new_n=$(wc -w <<<"$cleaned")
+(( new_n <= raw_n + MAX_NEW_WORDS )) || passthrough "$text"
 
 printf '%s' "$cleaned"

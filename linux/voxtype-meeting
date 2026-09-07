@@ -29,6 +29,19 @@
 # Why this script exists at all: `voxtype meeting` has start/stop/pause/resume
 # but no toggle, which is the one thing a single keybinding needs.
 #
+# THE PREFLIGHT, carried over from the macOS twin. The dangerous failure is
+# not a refusal, it is a half-transcript: with no monitor source to attach to,
+# `loopback_device = "auto"` logs "No monitor source found, using mic only"
+# and happily records only your own half of the call. So start() refuses
+# before recording unless meeting.enabled is true and PipeWire is exposing a
+# monitor source, then watches the daemon's journal for that exact message
+# for 3 s after starting -- loud notification either way, never silent.
+#
+# And stop() waits for the daemon to finalise the record before saying the
+# meeting is saved, because `voxtype meeting stop` returns while the last
+# chunk is still being transcribed and a summarize chained onto a stop would
+# otherwise export an empty transcript.
+#
 # SUMMARIZE. Carried over from the macOS twin (scripts/voxtype/macos/
 # voxtype-meeting), which is where it was built; the two are kept in step.
 # A transcript is a far heavier job than a dictation -- thousands of words
@@ -186,6 +199,40 @@ state() {
 # only signal, and it has to be captured once: re-running the command to read
 # its message would start or stop a second meeting as a side effect.
 start() {
+  # Preflight 1: the config gate. "Error: Meeting mode is disabled" from the
+  # daemon is a refusal this script must never let look like a recording.
+  local enabled
+  enabled="$(voxtype config get meeting.enabled 2>/dev/null || true)"
+  if [[ $enabled != true ]]; then
+    notify '󰍮' 'Meeting mode is off' \
+      'Run linux/install.sh, or: voxtype config set meeting.enabled true' critical
+    die "meeting.enabled is '${enabled:-unset}', not true; refusing to start a mic-only recording"
+  fi
+  # Preflight 2: the capture path. The macOS twin checks its pactl/parec shim
+  # here, and this is that same check against the mechanism this side uses:
+  # `loopback_device = auto` asks the daemon to find a PipeWire monitor
+  # source, and finding none makes it log "No monitor source found, using mic
+  # only" and RECORD ANYWAY -- the half-transcript both preflights exist to
+  # prevent. `disabled` is a deliberate mic-only choice and is left alone;
+  # the macOS twin has no such setting to honour, because over there the shim
+  # is the mechanism rather than a device.
+  local loopback
+  loopback="$(voxtype config get meeting.audio.loopback_device 2>/dev/null || true)"
+  if [[ $loopback != disabled ]] &&
+     ! pactl list short sources 2>/dev/null | grep -q '\.monitor'; then
+    notify '󰍮' 'No monitor source' \
+      'PipeWire exposes no .monitor source; the remote side would NOT be recorded' critical
+    die 'no PipeWire monitor source; the daemon would record mic only'
+  fi
+
+  # Where the journal is now, so the tripwire below reads only what this
+  # start produces. A cursor rather than the macOS twin's line counts:
+  # journald hands one out and it is exact, where a `--since` timestamp
+  # re-reads anything logged in the same second.
+  local cursor
+  cursor="$(journalctl --user -u voxtype -n 0 --no-pager --show-cursor 2>/dev/null |
+            sed -n 's/^-- cursor: //p')"
+
   panel
   local out
   out="$(voxtype meeting start 2>&1 || true)"
@@ -201,6 +248,26 @@ start() {
     die "voxtype meeting start refused: $(tr '\n' ' ' <<<"$out")"
   else
     notify '󰑊' 'Meeting recording' 'Mic + remote audio, transcribed by speaker'
+    # The half-transcript tripwire. Preflight 2 proved a monitor source
+    # existed a moment ago; this proves the daemon actually attached to one,
+    # which is a different claim -- the source can go away between the two,
+    # and `auto` degrades to mic-only silently either way. nohup and `&`
+    # because this script has to return to the keybinding at once while the
+    # watcher needs its 3 s.
+    if [[ -n $cursor && -n $NOTIFY ]]; then
+      # shellcheck disable=SC2016  # the single quotes are the point: $1 and
+      # $2 must reach the child unexpanded, as its own arguments.
+      nohup bash -c '
+        sleep 3
+        if journalctl --user -u voxtype --after-cursor "$1" --no-pager 2>/dev/null |
+           grep -qi "No monitor source found"; then
+          "$2" -g "󰍮" -u critical \
+            "Meeting is recording MIC ONLY" \
+            "The daemon found no monitor source; the remote side is NOT recorded" \
+            >/dev/null 2>&1 || true
+        fi
+      ' watch "$cursor" "$NOTIFY" >/dev/null 2>&1 &
+    fi
   fi
 }
 
@@ -226,7 +293,24 @@ stop() {
     notify '󰍮' 'Meeting failed to stop' "$(tail -1 <<<"$out")" critical
     die "voxtype meeting stop refused: $(tr '\n' ' ' <<<"$out")"
   else
-    notify '󰄬' 'Meeting saved' 'voxtype meeting show latest'
+    # `voxtype meeting stop` returns before the record is finalised: the
+    # daemon still has to transcribe the final chunk and write the
+    # transcript. Measured on the macOS twin -- `voxtype meeting show latest`
+    # immediately after a stop reported the meeting Active with 0 chunks, and
+    # the same command a few seconds later showed 2 chunks and 61 words --
+    # and it is the same daemon on this side. Anything chained after a stop
+    # (export, summarize, or a human reading the transcript) would otherwise
+    # see an empty meeting and conclude the capture failed. Bounded: if the
+    # daemon has not settled in 30 s, say so and carry on rather than hanging
+    # a toggle that is sitting behind a keybinding.
+    local i=0
+    while [[ $(state) != idle ]] && (( i < 300 )); do sleep 0.1; i=$((i+1)); done
+    if (( i >= 300 )); then
+      notify '󰍮' 'Meeting stopped, still finalising' \
+        'Give it a moment before exporting' normal
+    else
+      notify '󰄬' 'Meeting saved' 'voxtype-meeting summarize latest'
+    fi
   fi
 }
 
@@ -693,7 +777,7 @@ case "${1:-toggle}" in
   export) export_meeting "${2:-latest}" ;;
   summarize) shift; summarize "$@" ;;
   -h|--help|help)
-    sed -n '3,71p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,84p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command: $1 (try: toggle, start, stop, status, panel, export, summarize)" ;;
 esac

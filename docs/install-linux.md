@@ -117,6 +117,25 @@ llama-server. `local` is only ever valid as the last link, so a local outage
 can never escalate a transcript onto the network. The full chain rules are in
 [configuration](configuration.md).
 
+`voxtype-meeting start` **refuses rather than half-records**, the same
+preflight the macOS twin runs against its shim. The failure it exists to
+prevent is not a refusal, it is a half-transcript: with no monitor source to
+attach to, `meeting.audio.loopback_device = "auto"` logs `No monitor source
+found, using mic only` and records anyway, so the remote side is missing and
+nothing says so until you read the transcript. So it checks that
+`meeting.enabled` is true and that PipeWire is exposing a `.monitor` source
+before recording, then watches the daemon's journal for that exact message for
+three seconds after starting and posts a critical notification if it appears.
+Set `loopback_device = "disabled"` and the source check steps aside, because
+mic-only is then a choice rather than an accident.
+
+`voxtype-meeting stop` waits for the daemon to finalise the record before it
+reports the meeting saved. `voxtype meeting stop` returns while the last chunk
+is still being transcribed, so a `summarize` chained onto a stop would
+otherwise export an empty transcript and look like a failed capture. The wait
+is bounded at 30 s, after which it says the record is still finalising and
+returns rather than hanging a toggle that is sitting behind a keybinding.
+
 Optional triggers, as snippets rather than installs (`linux/integration/`):
 
 - **Hyprland** (`hyprland-bind.lua`): a `SUPER + CTRL + M` bind running
@@ -130,8 +149,9 @@ Optional triggers, as snippets rather than installs (`linux/integration/`):
 The installer reports and never fetches:
 
 ```sh
-# cleanup (Q8 on a big GPU; Q4_K_M at ~2.5 GB is the smaller option)
-hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q8_0.gguf \
+# cleanup (Q4_K_M, the same quantisation the macOS twin runs: ~2.5 GB, and
+# measured faster than Q8_0 on this box -- 124 ms against 145 ms at the median)
+hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q4_K_M.gguf \
    --local-dir ~/.local/share/models
 systemctl --user enable --now llama-server.service
 
@@ -146,6 +166,7 @@ voxtype setup check                          # hotkey attached, input group, VAD
 systemctl --user status llama-server         # active, model loaded
 printf "um so can you check the uh tailscale status" | voxtype-cleanup
 # expect: So can you check the Tailscale status?   (once llama-server is up)
-voxtype-meeting start; sleep 5; voxtype-meeting stop
+voxtype-meeting start; sleep 5; voxtype-meeting stop   # stop waits for the record
 voxtype meeting export latest --speakers     # both a You and a Remote section
+voxtype-meeting summarize latest             # chain, then the export path
 ```

@@ -79,6 +79,7 @@ remove.
 | `VOXTYPE_CLEANUP_MAX_GROWTH` | 3 | cleaned/raw length ratio that means the model editorialised |
 | `VOXTYPE_CLEANUP_MIN_SHRINK` | 55 % local / 45 % cloud | floor the cleaned text must keep |
 | `VOXTYPE_CLEANUP_KEEP_WORDS` | 70 | % of raw content words that must survive |
+| `VOXTYPE_CLEANUP_MAX_NEW_WORDS` | 0 | words the answer may have that the raw text did not |
 | `VOXTYPE_CLEANUP_NOTIFY_AFTER` | 1200 ms | progress toast appears only past this wait |
 | `VOXTYPE_CLEANUP_CONTEXT` | — | extra context appended to the system prompt (see below) |
 | `VOXTYPE_CONTEXT_LOCAL_ONLY` | `1` | drop the context on cloud backends |
