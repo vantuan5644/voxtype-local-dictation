@@ -36,15 +36,36 @@
 # exists, and watches the daemon log for that exact message for 3 s after
 # starting -- loud notification either way, never silent.
 #
-# SUMMARIZE. Local by default: llama.cpp on 127.0.0.1:8088, map-reduce over
-# ~2,000-token chunks because the server runs --ctx-size 4096. The cloud
-# backends are an explicit opt-in, never a fallback -- the transcript must
-# not leave the machine because the local server is down. The fallback is
-# always "print the error and the export path".
+# SUMMARIZE. A transcript is a far heavier job than a dictation -- thousands
+# of words against twenty, and a structured answer rather than a copy-edit --
+# so the backend is an ordered CHAIN that leads with the cloud and keeps the
+# local model as the catch. Default: codex,claude,local. Each link is tried
+# in turn, the first one returning valid JSON wins, and the backend that
+# actually produced the summary is named in its heading. codex leads because
+# it is the cheaper of the two CLIs to spend on a whole transcript.
 #
-#   VOXTYPE_MEETING_SUMMARY_BACKEND        local (default) | claude | codex | off
+# The chain may only ever fall back TOWARD this machine. `local` is accepted
+# as the last link and nowhere else, so a local server that is merely down
+# can never hand the transcript to the network. That was the original rule
+# here and it survives the inversion intact -- what changed is which side
+# starts, not the direction failure is allowed to travel.
+#
+# Know what the new default costs, because it is a posture change: a meeting
+# transcript contains the REMOTE participants' speech, not just yours, and
+# with this chain it leaves the machine first. Set BACKEND=local for a
+# meeting where that is not acceptable -- a single value still means exactly
+# what it did before, local-only with no catch behind it.
+#
+# Local is map-reduce over ~2,000-token chunks because the server runs
+# --ctx-size 4096; the cloud links send the whole transcript in one call.
+#
+#   VOXTYPE_MEETING_SUMMARY_BACKEND        ordered chain, comma-separated
+#                                          (default codex,claude,local; or off)
 #   VOXTYPE_MEETING_SUMMARY_ENDPOINT       local base URL (default 127.0.0.1:8088)
-#   VOXTYPE_MEETING_SUMMARY_MODEL          local model alias / claude model
+#   VOXTYPE_MEETING_SUMMARY_LOCAL_MODEL    local alias (default qwen3-4b-instruct-2507)
+#   VOXTYPE_MEETING_SUMMARY_CLAUDE_MODEL   claude model (default sonnet)
+#   VOXTYPE_MEETING_SUMMARY_MODEL          back-compat, honoured only when the
+#                                          chain is one backend long
 #   VOXTYPE_MEETING_SUMMARY_TIMEOUT        seconds per call (default 120 local, 300 cloud)
 #   VOXTYPE_MEETING_SUMMARY_CHUNK_WORDS    words per chunk (default 1400 ~ 2000 tokens)
 #   VOXTYPE_MEETING_SUMMARY_CODEX_PROFILE  codex profile (default luna)
@@ -72,10 +93,44 @@ NOTIFY="$HOME/.local/bin/voxtype-notify"
 [[ -x $NOTIFY ]] || NOTIFY="$(dirname "$0")/voxtype-notify"
 [[ -x $NOTIFY ]] || NOTIFY=""
 
-BACKEND="${VOXTYPE_MEETING_SUMMARY_BACKEND:-local}"
+# The chain, split once. Trimmed per element so `codex, claude, local` reads
+# the same as the tight form -- this is a variable people set by hand in a
+# shell profile, not a machine-generated one.
+BACKEND_CHAIN=()
+_resolve_chain() {
+  local raw="${VOXTYPE_MEETING_SUMMARY_BACKEND:-codex,claude,local}" part
+  local IFS=,
+  for part in $raw; do
+    part="${part#"${part%%[![:space:]]*}"}"
+    part="${part%"${part##*[![:space:]]}"}"
+    [[ -n $part ]] && BACKEND_CHAIN+=("$part")
+  done
+}
+_resolve_chain
+
 ENDPOINT="${VOXTYPE_MEETING_SUMMARY_ENDPOINT:-http://127.0.0.1:8088}"
-LOCAL_MODEL="${VOXTYPE_MEETING_SUMMARY_MODEL:-qwen3-4b-instruct-2507}"
+LOCAL_MODEL="${VOXTYPE_MEETING_SUMMARY_LOCAL_MODEL:-qwen3-4b-instruct-2507}"
+CLAUDE_MODEL="${VOXTYPE_MEETING_SUMMARY_CLAUDE_MODEL:-sonnet}"
 CHUNK_WORDS="${VOXTYPE_MEETING_SUMMARY_CHUNK_WORDS:-1400}"
+
+# VOXTYPE_MEETING_SUMMARY_MODEL meant "the local alias OR the claude model",
+# which was well defined only because the backend used to be a single value.
+# In a chain both can run in one invocation, so it is honoured for a one-link
+# chain -- exactly the configurations where it was unambiguous -- and reported
+# as ignored otherwise. Silently applying it to whichever backend happened to
+# win would be the worst of the three options.
+resolve_legacy_model() {
+  [[ -n ${VOXTYPE_MEETING_SUMMARY_MODEL:-} ]] || return 0
+  if (( ${#BACKEND_CHAIN[@]} == 1 )); then
+    case "${BACKEND_CHAIN[0]}" in
+      local)  LOCAL_MODEL="$VOXTYPE_MEETING_SUMMARY_MODEL" ;;
+      claude) CLAUDE_MODEL="$VOXTYPE_MEETING_SUMMARY_MODEL" ;;
+    esac
+  else
+    printf 'voxtype-meeting: VOXTYPE_MEETING_SUMMARY_MODEL is ambiguous across a %d-backend chain; ignoring it (use _LOCAL_MODEL / _CLAUDE_MODEL)\n' \
+      "${#BACKEND_CHAIN[@]}" >&2
+  fi
+}
 
 die() { printf 'voxtype-meeting: %s\n' "$*" >&2; exit 1; }
 
@@ -379,14 +434,16 @@ chat_local() {
     jq -r '.choices[0].message.content // empty'
 }
 
-# chat_cloud <system> <user> -- raw content on stdout. Whole transcript in
-# one call; the flags are voxtype-cleanup's, measured there.
+# chat_cloud <backend> <system> <user> -- raw content on stdout. Whole
+# transcript in one call; the flags are voxtype-cleanup's, measured there.
+# The backend is an argument rather than the global it used to read: within
+# one chain run, which CLI is being asked changes.
 chat_cloud() {
-  local sys="$1" user="$2" t="${VOXTYPE_MEETING_SUMMARY_TIMEOUT:-300}"
-  case "$BACKEND" in
+  local backend="$1" sys="$2" user="$3" t="${VOXTYPE_MEETING_SUMMARY_TIMEOUT:-300}"
+  case "$backend" in
     claude)
       cd / && printf '%s\n' "$user" |
-        with_timeout "$t" claude -p --model "${VOXTYPE_MEETING_SUMMARY_MODEL:-haiku}" \
+        with_timeout "$t" claude -p --model "$CLAUDE_MODEL" \
           --strict-mcp-config --tools '' --safe-mode --system-prompt "$sys"
       ;;
     codex)
@@ -396,6 +453,138 @@ chat_cloud() {
           --sandbox read-only --ephemeral --skip-git-repo-check "$sys"
       ;;
   esac
+}
+
+# validate_chain -- every link, in order, before anything is exported. A
+# misspelled backend or a bad ordering has to fail here rather than three
+# minutes into a summary.
+validate_chain() {
+  local n=${#BACKEND_CHAIN[@]} i b
+  (( n > 0 )) ||
+    die 'VOXTYPE_MEETING_SUMMARY_BACKEND is empty (want an ordered list, e.g. codex,claude,local)'
+  for (( i = 0; i < n; i++ )); do
+    b="${BACKEND_CHAIN[i]}"
+    case "$b" in
+      claude|codex) ;;
+      local)
+        # `local` is the catch and never a link something can escalate PAST.
+        # If a local failure could hand the transcript to a cloud CLI, then a
+        # server that is merely down would put the remote participants'
+        # speech on the network -- the exact thing the offline default was
+        # protecting. Refuse the ordering instead of quietly reordering it.
+        (( i == n - 1 )) ||
+          die "'local' may only be the last backend in the chain (got: ${BACKEND_CHAIN[*]}); a local failure must never escalate a transcript to the cloud"
+        ;;
+      off)
+        (( n == 1 )) ||
+          die "'off' cannot be combined with other backends (got: ${BACKEND_CHAIN[*]})"
+        die "summaries are off (VOXTYPE_MEETING_SUMMARY_BACKEND=off); the transcript itself is exported"
+        ;;
+      *) die "unknown backend '$b' (want an ordered list of: claude | codex | local, or off)" ;;
+    esac
+  done
+}
+
+# backend_available <backend> -- 0 if it is worth trying. On 1 it prints the
+# reason on stdout, so the caller can report every skipped link at once.
+backend_available() {
+  case "$1" in
+    local)
+      curl -sf --connect-timeout 1 --max-time 3 "$ENDPOINT/health" >/dev/null 2>&1 ||
+        { printf 'not answering at %s/health' "$ENDPOINT"; return 1; }
+      ;;
+    *)
+      command -v "$1" >/dev/null 2>&1 ||
+        { printf 'not on PATH'; return 1; }
+      ;;
+  esac
+}
+
+# run_local <text> -- summary JSON on stdout, progress on stderr. Returns
+# non-zero with a reason rather than dying: in a chain, a backend that fails
+# is a reason to try the next link, not the end of the command.
+run_local() {
+  local text="$1"
+  # Map-reduce: the server runs --ctx-size 4096, so ~2,000-token chunks
+  # (~1,400 words at 1.4 tokens/word) leave room for the system prompt and
+  # the answer.
+  #
+  # tmpd is deliberately NOT local, and that is load-bearing rather than
+  # sloppy: the trap body is expanded when the trap FIRES, by which point
+  # this function has returned and a `local tmpd` is out of scope -- under
+  # `set -u` the cleanup then dies with "tmpd: unbound variable" and leaks
+  # the directory it was supposed to remove. Observed, not theorised.
+  tmpd="$(mktemp -d)"
+  trap 'rm -rf "$tmpd"' EXIT
+  printf '%s\n' "$text" | awk -v budget="$CHUNK_WORDS" -v prefix="$tmpd/c." '
+    {
+      w += NF
+      if (buf != "" && w > budget) { print buf > (prefix n); close(prefix n); n++; buf = ""; w = NF }
+      buf = buf $0 "\n"
+    }
+    END { if (buf != "") print buf > (prefix n) }'
+  local chunks=0 f
+  for f in "$tmpd"/c.*; do [[ -e $f ]] && chunks=$((chunks+1)); done
+
+  local i=0 partials=() p
+  for f in "$tmpd"/c.*; do
+    [[ -e $f ]] || continue
+    i=$((i+1))
+    printf '  chunk %d of %d...\n' "$i" "$chunks" >&2
+    p="$(chat_local "$MAP_PROMPT" "<transcript>
+$(cat "$f")
+</transcript>" 700 | model_json)"
+    if [[ -z $p ]]; then
+      # One retry with the reminder appended; a model that wrapped its JSON
+      # in prose is the common failure and is recoverable.
+      p="$(chat_local "$MAP_PROMPT
+
+Return ONLY the JSON object." "<transcript>
+$(cat "$f")
+</transcript>" 700 | model_json)"
+    fi
+    if [[ -z $p ]]; then
+      printf 'chunk %d of %d produced no valid JSON\n' "$i" "$chunks" >&2
+      return 1
+    fi
+    partials+=("$p")
+  done
+
+  if (( ${#partials[@]} == 1 )); then
+    printf '%s\n' "${partials[0]}"
+    return 0
+  fi
+
+  local joined first=1
+  for p in "${partials[@]}"; do
+    if (( first )); then joined="$p"; first=0; else joined="$joined
+$p"; fi
+  done
+  printf '  reducing %d partials...\n' "${#partials[@]}" >&2
+  local merged
+  merged="$(chat_local "$REDUCE_PROMPT" "<partials>
+$joined
+</partials>" 800 | model_json)"
+  if [[ -z $merged ]]; then
+    printf 'the reduce step produced no valid JSON; all %d chunk summaries were produced but none is presented as complete\n' \
+      "$chunks" >&2
+    return 1
+  fi
+  printf '%s\n' "$merged"
+}
+
+# run_cloud <backend> <text> -- summary JSON on stdout, reason on stderr.
+# The CLI's own stderr is left alone: codex writes its progress there.
+run_cloud() {
+  local backend="$1" text="$2" out
+  out="$(chat_cloud "$backend" "$MAP_PROMPT" "<transcript>
+$text
+</transcript>" | model_json)" || true
+  if [[ -z $out ]]; then
+    printf '%s returned no valid JSON\n' "$backend" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
 }
 
 # json_to_markdown -- renders the validated summary JSON as markdown.
@@ -430,11 +619,8 @@ summarize() {
     esac
   done
 
-  case "$BACKEND" in
-    local|claude|codex) ;;
-    off) die "summaries are off (VOXTYPE_MEETING_SUMMARY_BACKEND=off); the transcript itself is exported" ;;
-    *) die "unknown backend '$BACKEND' (want local | claude | codex | off)" ;;
-  esac
+  validate_chain
+  resolve_legacy_model
 
   command -v voxtype >/dev/null 2>&1 || die 'voxtype is not installed'
   command -v jq >/dev/null 2>&1 || die 'jq is required for summaries'
@@ -467,14 +653,30 @@ summarize() {
   local export_path
   export_path="$(export_meeting "$id")"
 
-  # Health checks up front: a failed local run must NEVER fall back to the
-  # cloud -- the transcript stays on the machine or the command fails.
-  if [[ $BACKEND == local ]]; then
-    curl -sf --connect-timeout 1 --max-time 3 "$ENDPOINT/health" >/dev/null 2>&1 ||
-      die "local summary server is not answering at $ENDPOINT/health; the transcript is exported at: $export_path"
-  else
-    command -v "$BACKEND" >/dev/null 2>&1 ||
-      die "'$BACKEND' is not on PATH; the transcript is exported at: $export_path"
+  # Preflight the whole chain before any work: which links are even worth
+  # trying is knowable up front, and a chain with nothing available must fail
+  # here exactly as the single backend used to. Skipped links are named --
+  # a chain that quietly degrades to its last link is the failure mode this
+  # file argues against everywhere else.
+  local available=() skipped=() b why
+  for b in "${BACKEND_CHAIN[@]}"; do
+    if why="$(backend_available "$b")"; then
+      available+=("$b")
+    else
+      skipped+=("$b ($why)")
+    fi
+  done
+  if (( ${#available[@]} == 0 )); then
+    die "no summary backend is available -- ${skipped[*]}; the transcript is exported at: $export_path"
+  fi
+  # Guarded, and not merely tidy: bash 3.2 expands "${arr[@]}" on an EMPTY
+  # array as an unbound variable under `set -u`, and nothing skipped is the
+  # normal case. /bin/bash is 3.2 and is what a launchd or menu invocation
+  # gets, so this aborts there while passing under any bash 4.4+.
+  if (( ${#skipped[@]} > 0 )); then
+    for why in "${skipped[@]}"; do
+      printf 'voxtype-meeting: skipping %s\n' "$why" >&2
+    done
   fi
 
   # Re-summarising replaces the previous summary rather than stacking a
@@ -488,71 +690,25 @@ summarize() {
       "$export_path" >"$trimmed" && mv "$trimmed" "$export_path"
   fi
 
-  local final_json="" started_at
+  local final_json="" used="" started_at
   started_at="$(date +%s)"
-  if [[ $BACKEND == local ]]; then
-    # Map-reduce: the server runs --ctx-size 4096, so ~2,000-token chunks
-    # (~1,400 words at 1.4 tokens/word) leave room for the system prompt
-    # and the answer. tmpd is deliberately NOT local: the EXIT trap must
-    # still see it after this function returns.
-    tmpd="$(mktemp -d)"
-    trap 'rm -rf "$tmpd"' EXIT
-    printf '%s\n' "$text" | awk -v budget="$CHUNK_WORDS" -v prefix="$tmpd/c." '
-      {
-        w += NF
-        if (buf != "" && w > budget) { print buf > (prefix n); close(prefix n); n++; buf = ""; w = NF }
-        buf = buf $0 "\n"
-      }
-      END { if (buf != "") print buf > (prefix n) }'
-    local chunks=0
-    for f in "$tmpd"/c.*; do [[ -e $f ]] && chunks=$((chunks+1)); done
-
-    local i=0 partials=() p
-    for f in "$tmpd"/c.*; do
-      [[ -e $f ]] || continue
-      i=$((i+1))
-      printf '  chunk %d of %d...\n' "$i" "$chunks" >&2
-      p="$(chat_local "$MAP_PROMPT" "<transcript>
-$(cat "$f")
-</transcript>" 700 | model_json)"
-      if [[ -z $p ]]; then
-        # One retry with the reminder appended; a model that wrapped its JSON
-        # in prose is the common failure and is recoverable.
-        p="$(chat_local "$MAP_PROMPT
-
-Return ONLY the JSON object." "<transcript>
-$(cat "$f")
-</transcript>" 700 | model_json)"
-      fi
-      if [[ -z $p ]]; then
-        die "chunk $i of $chunks failed (no valid JSON from the local model); nothing was summarized -- the transcript is exported at: $export_path"
-      fi
-      partials+=("$p")
-    done
-
-    if (( ${#partials[@]} == 1 )); then
-      final_json="${partials[0]}"
+  local n=${#available[@]} idx=0
+  for b in "${available[@]}"; do
+    idx=$((idx+1))
+    (( n > 1 )) && printf 'voxtype-meeting: summarizing with %s...\n' "$b" >&2
+    if [[ $b == local ]]; then
+      final_json="$(run_local "$text")" || final_json=""
     else
-      local joined first=1
-      for p in "${partials[@]}"; do
-        if (( first )); then joined="$p"; first=0; else joined="$joined
-$p"; fi
-      done
-      printf '  reducing %d partials...\n' "${#partials[@]}" >&2
-      final_json="$(chat_local "$REDUCE_PROMPT" "<partials>
-$joined
-</partials>" 800 | model_json)"
-      [[ -n $final_json ]] ||
-        die "the reduce step failed (no valid JSON from the local model); all $chunks chunk summaries were produced but none is presented as complete -- the transcript is exported at: $export_path"
+      final_json="$(run_cloud "$b" "$text")" || final_json=""
     fi
-  else
-    # Cloud: whole transcript in one call, explicit opt-in only.
-    final_json="$(chat_cloud "$MAP_PROMPT" "<transcript>
-$text
-</transcript>" | model_json)"
-    [[ -n $final_json ]] ||
-      die "'$BACKEND' returned no valid JSON; nothing was summarized -- the transcript is exported at: $export_path"
-  fi
+    [[ -n $final_json ]] && { used="$b"; break; }
+    if (( idx < n )); then
+      printf 'voxtype-meeting: %s failed; falling back to %s\n' "$b" "${available[idx]}" >&2
+      notify '󰍮' "Summary: $b failed" "falling back to ${available[idx]}" normal
+    fi
+  done
+  [[ -n $final_json ]] ||
+    die "every available backend failed (tried: ${available[*]}); nothing was summarized -- the transcript is exported at: $export_path"
 
   if (( raw )); then
     printf '%s\n' "$final_json"
@@ -565,7 +721,7 @@ $text
   {
     printf '\n---\n\n'
     printf '%s\n' "$SUMMARY_MARKER"
-    printf '# Summary (backend: %s, %ds)\n\n' "$BACKEND" "$took"
+    printf '# Summary (backend: %s, %ds)\n\n' "$used" "$took"
     printf '%s\n' "$md"
   } >>"$export_path"
   printf '%s\n' "$md"
@@ -589,7 +745,7 @@ case "${1:-toggle}" in
   export)    export_meeting "${2:-latest}" ;;
   summarize) shift; summarize "$@" ;;
   -h|--help|help)
-    sed -n '3,53p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,71p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command: $1 (try: toggle, start, stop, status, export, summarize)" ;;
 esac
