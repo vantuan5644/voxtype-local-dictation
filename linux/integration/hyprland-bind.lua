@@ -1,0 +1,16 @@
+-- Optional: a Hyprland keybinding for the meeting toggle, in the syntax
+-- Omarchy's hyprlua bindings file uses. Copy the line into
+-- ~/.config/hypr/bindings.lua (or your own hyprland.conf equivalent):
+--
+--   bind("SUPER + CTRL + M", "Toggle meeting transcription", "voxtype-meeting toggle")
+--
+-- Why SUPER+CTRL+M and not the obvious chord: voxtype's push-to-talk key on
+-- Linux is the physical Right Alt, read straight off evdev and NOT grabbed by
+-- the compositor, so it stays a live modifier -- every ALT-bearing bind fires
+-- its action AND starts a stray push-to-talk recording (VAD makes those
+-- harmless, but why pay). SUPER+CTRL+M shares no physical key with it. Pick
+-- any chord that avoids your push-to-talk key.
+--
+-- The daemon needs a restart-free way to see nothing here: this bind only
+-- shells out to voxtype-meeting, which talks to the running daemon's CLI.
+-- hyprctl reload after editing, nothing else.

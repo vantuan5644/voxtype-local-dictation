@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tuantran.llama-server</string>
+
+	<!-- Preflight (model present, Metal present) and every flag live in the
+	     wrapper -- launchd has no ExecStartPre, so this plist stays thin.
+	     __HOME__ is substituted by install.sh when the plist is copied into
+	     ~/Library/LaunchAgents/. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/.local/bin/llama-server-run</string>
+	</array>
+
+	<!-- launchd hands agents /usr/bin:/bin:/bin:/usr/sbin:/sbin and nothing
+	     else; llama-server-run execs `llama-server` by name, so Homebrew has
+	     to be on the PATH or the wrapper dies looking for it. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Restart=on-failure analogue: relaunch unless it exited cleanly. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<!-- No app-nap jitter on a latency-sensitive server. -->
+	<!-- Adaptive, not Background. A Background job is throttled on CPU and I/O
+	     as work "not directly requested by the user" -- but a dictation is
+	     blocked on this server's answer, and the whole point of the local
+	     backend is a 145ms median. Adaptive lets launchd promote it while it
+	     is being asked for something. -->
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+
+	<key>StandardOutPath</key>
+	<string>__HOME__/Library/Logs/voxtype-llama-server.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/voxtype-llama-server.log</string>
+</dict>
+</plist>

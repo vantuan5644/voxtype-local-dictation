@@ -1,0 +1,15 @@
+// Optional: a "Meeting Transcribe" row for the Omarchy menu, in the syntax
+// of ~/.config/omarchy/extensions/omarchy-menu.jsonc (merge by key; the menu
+// hot-reloads on save). Copy the whole entry into the "trigger" object:
+//
+//   "trigger.capture.meeting": {"icon":"󰫬","label":"Meeting Transcribe","aliases":["meeting","transcribe","meeting-transcribe"],"description":"Record a call: mic + remote audio, speaker-split transcript","when":"omarchy-cmd-present voxtype voxtype-meeting","checked":"[[ $(voxtype-meeting status) != idle ]]","action":"voxtype-meeting toggle"}
+//
+// The `checked` guard treats every failure -- daemon stopped, voxtype not
+// installed, output format changed by an upgrade -- as idle, which leaves the
+// row unticked and the toggle trying to start: the harmless direction (a
+// permanently ticked row that can do nothing is the harmful one). The same
+// reasoning lives inside voxtype-meeting's state() -- keep the two agreeing.
+//
+// The `when` guard is Omarchy-specific (omarchy-cmd-present); on another
+// Hyprland setup a plain wofi/rofi entry calling `voxtype-meeting toggle`
+// needs no guard at all.

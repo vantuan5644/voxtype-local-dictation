@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+#
+# macOS notification shim for the voxtype scripts -- the counterpart of
+# linux/voxtype-notify, which wraps the Linux notifiers the same way.
+# See docs/install-macos.md.
+#
+# Supports exactly the flag subset the ported scripts use, reproducing the
+# progress-toast idiom they rely on (-p prints an id, -r <id> removes it,
+# -t 0 persists until removed):
+#   -p            print the notification id on stdout
+#   -r <id>       remove the notification that -p posted
+#   -t <ms>       accepted for compatibility, otherwise IGNORED: macOS
+#                 banners dismiss on the system's own schedule and neither
+#                 notifier below has a timeout control. Clearing goes
+#                 through -r, never through a short-lived replacement.
+#   -g <glyph>    icon glyph; prefixed to the title (per-notification app
+#                 icons are not scriptable without a signed bundle)
+#   -u <urgency>  low | normal | critical; critical plays the default sound
+#   <title> [description]
+#
+# Degrades to silence and always exits 0 -- a notification must never fail a
+# dictation. terminal-notifier first (its -group/-remove give the
+# replace-by-id semantics the progress toast needs), then
+# `osascript display notification`, then nothing: the same silent-fallback
+# contract the Linux shim's guard gives when nothing is installed.
+set -euo pipefail
+
+PRINT=0
+REMOVE=""
+GLYPH=""
+URGENCY=""
+TITLE=""
+DESC=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    -p) PRINT=1 ;;
+    -r) REMOVE="${2:-}"; shift ;;
+    -t) shift ;;                      # accepted, ignored -- see header
+    -g) GLYPH="${2:-}"; shift ;;
+    -u) URGENCY="${2:-}"; shift ;;
+    -h|--help) sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) ;;                            # unknown flag: swallow, stay usable
+    *)  if [[ -z $TITLE ]]; then TITLE="$1"; else DESC="$1"; fi ;;
+  esac
+  shift
+done
+
+# Fire and forget, always. This is a hard requirement, not tidiness.
+#
+# voxtype-cleanup captures the id with PROGRESS_ID=$(voxtype-notify -p ...),
+# a command substitution that blocks until this script exits. So anything
+# slow here is added to EVERY dictation, and anything that hangs stalls the
+# filter until voxtype's own timeout_ms kills it -- which takes the raw-text
+# fallback with it and breaks the one rule.
+#
+# That is not hypothetical: terminal-notifier 3.1.0 on this machine was
+# observed alive for minutes on a single -group post, and otherwise exits 3
+# (it has no Notification Center authorisation of its own). Nothing needs the
+# notifier's exit status, and the id below is generated here rather than
+# returned by it, so the post is backgrounded and this script returns at once.
+notify_bg() { ( "$@" >/dev/null 2>&1 & ) ; }
+
+# Removal is the whole job of the -r arm: terminal-notifier's -remove closes
+# the notification with that group id directly. (On Omarchy the idiom was
+# "-r <id> -t 1 <space>" -- replace with a 1ms toast -- only because it had
+# no remove; that extra dance is not needed here.)
+if [[ -n $REMOVE ]]; then
+  if command -v terminal-notifier >/dev/null 2>&1; then
+    notify_bg terminal-notifier -remove "$REMOVE"
+  fi
+  exit 0
+fi
+
+[[ -n $TITLE ]] || exit 0
+[[ -n $GLYPH ]] && TITLE="$GLYPH $TITLE"
+
+if command -v terminal-notifier >/dev/null 2>&1; then
+  # -group makes a later post with the same id replace this one, which is
+  # what keeps the progress toast from stacking.
+  id="voxtype-notify-$$-$(date +%s)"
+  args=(-group "$id" -title "$TITLE")
+  if [[ -n $DESC ]]; then args+=(-message "$DESC"); fi
+  if [[ $URGENCY == critical ]]; then args+=(-sound default); fi
+  notify_bg terminal-notifier "${args[@]}"
+  if (( PRINT )); then printf '%s\n' "$id"; fi
+  exit 0
+fi
+
+# No Homebrew notifier: osascript's display notification is built in and
+# needs no TCC grant of its own. It cannot remove or replace by id, so the
+# id printed for -p is inert -- the filter's EXIT trap will call -r with it
+# and take the silent path above.
+if command -v osascript >/dev/null 2>&1; then
+  esc() { local s="$1"; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "${s//$'\n'/ }"; }
+  msg="display notification \"$(esc "$DESC")\" with title \"$(esc "$TITLE")\""
+  if [[ $URGENCY == critical ]]; then msg="$msg sound name \"default\""; fi
+  notify_bg osascript -e "$msg"
+  if (( PRINT )); then printf 'osascript\n'; fi
+  exit 0
+fi
+
+# Nothing at all: silence, successfully.
+exit 0

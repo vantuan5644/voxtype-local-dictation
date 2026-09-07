@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#
+# Linux notification shim for the voxtype scripts. On the Omarchy desktop it
+# simply execs omarchy-notification-send; everywhere else it maps the same
+# flag subset onto notify-send (libnotify); with neither installed it stays
+# silent. See docs/install-linux.md.
+#
+# Supports exactly the flag subset the dictation scripts use, reproducing the
+# progress-toast idiom they rely on (-p prints an id, -r <id> removes it,
+# -t 0 persists until removed):
+#   -p            print the notification id on stdout (no-op when the
+#                 notifier underneath cannot supply one)
+#   -r <id>       remove the notification that -p posted
+#   -t <ms>       expire time in ms; 0 means "until removed"
+#   -g <glyph>    icon glyph; prefixed to the title (notify-send app icons
+#                 want a name or file, not a glyph)
+#   -u <urgency>  low | normal | critical
+#   <title> [description]
+#
+# Degrades to silence and always exits 0 -- a notification must never fail a
+# dictation. That is the same contract the macOS shim (macos/voxtype-notify)
+# has, and the reason every arm below ends in `|| true` / exit 0.
+set -euo pipefail
+
+# -h is handled before any notifier detection, so help works on a box with
+# none of them installed (where every later arm is a silent exit 0).
+for a in "$@"; do
+  [[ $a == -h || $a == --help ]] && { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+done
+
+# Omarchy first: its own notifier has the exact semantics (id print/replace,
+# glyph flag), so delegate verbatim and keep zero divergence there.
+if command -v omarchy-notification-send >/dev/null 2>&1; then
+  exec omarchy-notification-send "$@"
+fi
+
+command -v notify-send >/dev/null 2>&1 || exit 0
+
+PRINT=0
+REMOVE=""
+EXPIRE=""
+GLYPH=""
+URGENCY=""
+TITLE=""
+DESC=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    -p) PRINT=1 ;;
+    -r) REMOVE="${2:-}"; shift ;;
+    -t) EXPIRE="${2:-}"; shift ;;
+    -g) GLYPH="${2:-}"; shift ;;
+    -u) URGENCY="${2:-}"; shift ;;
+    -h|--help) sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;   # also handled above
+    -*) ;;                            # unknown flag: swallow, stay usable
+    *)  if [[ -z $TITLE ]]; then TITLE="$1"; else DESC="$1"; fi ;;
+  esac
+  shift
+done
+
+# notify-send -r/--replace-id and -p/--print-id exist since libnotify 0.8;
+# on 0.7 the replace idiom is unavailable and -p must print nothing (an
+# empty id makes the callers' clear_progress a no-op, which is the correct
+# degradation -- nothing to remove). Ask the binary rather than the distro.
+CAN_ID=0
+notify-send --help 2>&1 | grep -q -- '--print-id' && CAN_ID=1
+
+# Removal: notify-send has no remove, only replace -- so replace with a
+# 1 ms near-empty toast, the idiom the Omarchy notifier's own callers used
+# for years. Without replace support there is nothing better than silence.
+if [[ -n $REMOVE ]]; then
+  if (( CAN_ID )); then
+    notify-send --replace-id="$REMOVE" --expire-time=1 \
+      -u low ' ' >/dev/null 2>&1 || true
+  fi
+  exit 0
+fi
+
+[[ -n $TITLE ]] || exit 0
+[[ -n $GLYPH ]] && TITLE="$GLYPH $TITLE"
+
+args=( -a voxtype )
+if [[ -n $DESC ]]; then args+=( "$TITLE" "$DESC" ); else args+=( "$TITLE" ); fi
+case "$URGENCY" in
+  low|normal|critical) args+=( -u "$URGENCY" ) ;;
+esac
+# -t 0 means "never expire" for the servers that honour it at all; a missing
+# -t is passed through the same way (the callers always send one).
+if [[ -n $EXPIRE ]]; then
+  args+=( -t "$EXPIRE" )
+fi
+
+if (( CAN_ID && PRINT )); then
+  notify-send --print-id "${args[@]}" || true
+elif (( PRINT )); then
+  notify-send "${args[@]}" >/dev/null 2>&1 || true
+else
+  notify-send "${args[@]}" >/dev/null 2>&1 || true
+fi
+exit 0

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# Prints the dictation vocabulary as one comma-joined line, so that both
+# consumers -- whisper.initial_prompt (set by the installer for the host) and
+# the "Prefer these spellings" rule in voxtype-cleanup's system prompt -- read
+# the same file instead of each carrying its own hand-maintained copy.
+#
+# OS-agnostic on purpose, and portable to match: /usr/bin/env bash so it runs
+# under macOS's bash 3.2, and a POSIX awk program so BSD awk and gawk agree.
+#
+#   voxtype-vocab misheard     terms whisper renders as different words
+#   voxtype-vocab misspelled   terms it hears right and writes wrong
+#   voxtype-vocab all          both, misheard first (the default)
+#
+# VOXTYPE_VOCAB_FILE overrides the path, which is how each installer reads the
+# repo copy rather than depending on its own install having already happened.
+#
+# A missing or empty file prints nothing and exits 0. That is deliberate:
+# voxtype-cleanup calls this on the dictation path, where THE ONE RULE is
+# never to lose the user's words, so a vocabulary problem has to degrade into
+# a slightly worse prompt and never into a failed filter. The installers, which
+# can afford to complain, check for the empty result themselves.
+set -euo pipefail
+
+if [[ -n ${VOXTYPE_VOCAB_FILE:-} ]]; then
+  FILE="$VOXTYPE_VOCAB_FILE"
+else
+  FILE="$HOME/.config/voxtype/vocabulary.conf"
+  # Nothing installed yet? Use the copy next to this script -- in the checkout
+  # that is scripts/voxtype/vocabulary.conf, the very file both installers copy
+  # from -- so running voxtype-cleanup straight out of the tree (bench-cleanup.sh
+  # does) measures the prompt the installed filter actually sends.
+  [[ -f $FILE ]] || FILE="${BASH_SOURCE[0]%/*}/vocabulary.conf"
+fi
+SECTION="${1:-all}"
+
+case "$SECTION" in
+  misheard|misspelled|all) ;;
+  *) echo "voxtype-vocab: unknown section '$SECTION'" >&2; exit 2 ;;
+esac
+
+[[ -f $FILE ]] || exit 0
+
+exec awk -v want="$SECTION" '
+  {
+    line = $0
+    sub(/^[[:space:]]+/, "", line)
+    sub(/[[:space:]]+$/, "", line)
+  }
+  line == "" || line ~ /^#/ { next }
+  line ~ /^\[[^][]+\]$/     { sec = substr(line, 2, length(line) - 2); next }
+  {
+    if (want != "all" && want != sec) next
+    if (seen[line]++) next
+    out = (out == "" ? line : out ", " line)
+  }
+  END { if (out != "") print out }
+' "$FILE"

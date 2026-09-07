@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+#
+# Toggle voxtype's meeting transcription, and raise its controls panel at the
+# same time. See docs/install-linux.md.
+#
+#   voxtype-meeting toggle   start a meeting, or stop the running one
+#                            (the default when no command is given)
+#   voxtype-meeting start
+#   voxtype-meeting stop
+#   voxtype-meeting status   one word: recording | paused | idle
+#   voxtype-meeting panel    only raise the controls panel
+#
+# Meeting mode is NOT dictation. Short mode (hold Right Alt) transcribes the
+# microphone and types the result at the cursor. Meeting mode records the mic
+# *and* the remote participants through a PipeWire monitor source, transcribes
+# continuously in chunks, splits the transcript by speaker, and stores it --
+# nothing is typed anywhere. Read it back afterwards:
+#
+#   voxtype meeting list
+#   voxtype meeting show latest
+#   voxtype meeting export <id> --format md
+#
+# Why this script exists at all: `voxtype meeting` has start/stop/pause/resume
+# but no toggle, which is the one thing a single keybinding needs.
+#
+# The running/not-running decision has to be made by parsing text. Every
+# `voxtype meeting` subcommand here exits 0 whether it worked or refused --
+# measured, not assumed -- so an exit code says nothing at all. `status`
+# also lags `start` by about a second before it admits a meeting is running,
+# which is why start() treats "already in progress" as an expected answer
+# rather than an error.
+
+set -euo pipefail
+
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/voxtype"
+CONTROLS_FLAG="$RUNTIME_DIR/meeting-controls.flag"
+
+# voxtype-notify ships with this stack (same installer); resolved like
+# voxtype-cleanup resolves it, with omarchy-notification-send itself as a
+# third step so an Omarchy box that has not installed the shim yet keeps its
+# notifications unchanged.
+NOTIFY="${BASH_SOURCE[0]%/*}/voxtype-notify"
+[[ -x $NOTIFY ]] || NOTIFY="$HOME/.local/bin/voxtype-notify"
+[[ -x $NOTIFY ]] || NOTIFY="$(command -v omarchy-notification-send 2>/dev/null || true)"
+[[ -x $NOTIFY ]] || NOTIFY=""
+
+die() { printf 'voxtype-meeting: %s\n' "$*" >&2; exit 1; }
+
+notify() { # notify <glyph> <headline> [description] [urgency]
+  local glyph="$1" headline="$2" desc="${3:-}" urg="${4:-low}"
+  [[ -n $NOTIFY ]] || return 0
+  if [[ -n $desc ]]; then
+    "$NOTIFY" -g "$glyph" -u "$urg" "$headline" "$desc" >/dev/null 2>&1 || true
+  else
+    "$NOTIFY" -g "$glyph" -u "$urg" "$headline" >/dev/null 2>&1 || true
+  fi
+}
+
+# Raise the meeting panel (title, state, elapsed, chunk count, and the
+# start/pause/resume/stop buttons). Only the *quickshell* OSD frontend renders
+# MeetingControls.qml -- under the gtk4 or native frontend the flag file is
+# read by nobody and nothing appears, which is inert rather than an error, so
+# this is unconditional and never fails the toggle.
+panel() {
+  mkdir -p "$RUNTIME_DIR" 2>/dev/null || return 0
+  touch "$CONTROLS_FLAG" 2>/dev/null || true
+}
+
+# recording | paused | idle
+#
+# Matches "recording" positively and falls back to idle, rather than treating
+# anything it does not recognise as a recording. That direction matters because
+# the menu row's `checked` guard is `[[ $(voxtype-meeting status) != idle ]]`:
+# defaulting the other way turns every failure -- daemon stopped, voxtype not
+# installed, output format changed by an upgrade -- into a permanent tick on a
+# row that cannot do anything. Failing to "idle" instead leaves the row
+# unticked and makes the toggle try to start, which is the harmless direction.
+state() {
+  local out
+  out="$(voxtype meeting status 2>/dev/null || true)"
+  if grep -qi 'paused' <<<"$out"; then
+    echo paused
+  elif grep -qiE 'status:[[:space:]]*recording' <<<"$out"; then
+    echo recording
+  else
+    echo idle
+  fi
+}
+
+# `voxtype meeting start` and `stop` both exit 0 even when they refuse --
+# measured: a second start prints "Error: A meeting is already in progress."
+# and still exits 0, as does a stop with nothing running. So the output is the
+# only signal, and it has to be captured once: re-running the command to read
+# its message would start or stop a second meeting as a side effect.
+start() {
+  panel
+  local out
+  out="$(voxtype meeting start 2>&1 || true)"
+  if grep -qi 'already in progress' <<<"$out"; then
+    # Almost always a double-tap of the keybinding inside the ~1s it takes
+    # `meeting status` to catch up with `meeting start`. Deliberately does not
+    # stop the meeting -- that would end a recording the user just began.
+    notify '󰑊' 'Meeting already recording' 'SUPER+CTRL+M again to stop it'
+  elif grep -qi '^error' <<<"$out"; then
+    # Most likely causes: meeting.enabled = false, or no monitor source for
+    # meeting.audio.loopback_device to attach to.
+    notify '󰍮' 'Meeting failed to start' "$(tail -1 <<<"$out")" critical
+    die "voxtype meeting start refused: $(tr '\n' ' ' <<<"$out")"
+  else
+    notify '󰑊' 'Meeting recording' 'Mic + remote audio, transcribed by speaker'
+  fi
+}
+
+stop() {
+  panel
+  local out
+  out="$(voxtype meeting stop 2>&1 || true)"
+  if grep -qi 'no meeting' <<<"$out"; then
+    notify '󰍮' 'No meeting to stop' '' normal
+  elif grep -qi 'not found' <<<"$out"; then
+    # The daemon is holding an active meeting whose stored record is gone --
+    # `voxtype meeting delete --force` accepts an *in-progress* meeting and
+    # removes it out from under the daemon. `stop` then fails forever with
+    # "Meeting not found", `status` reports "recording" forever, this toggle
+    # can never reach idle again, and the menu row keeps a permanent tick.
+    # Observed 2026-09-05. Restarting the daemon is the only way out, so do
+    # it rather than leaving the feature jammed -- but say so, because it
+    # also drops the loaded whisper model for a moment.
+    notify '󰍮' 'Meeting state was stuck' 'Record deleted while active; restarted voxtype' critical
+    systemctl --user restart voxtype >/dev/null 2>&1 ||
+      die 'meeting state stuck and voxtype restart failed; run: systemctl --user restart voxtype'
+  elif grep -qi '^error' <<<"$out"; then
+    notify '󰍮' 'Meeting failed to stop' "$(tail -1 <<<"$out")" critical
+    die "voxtype meeting stop refused: $(tr '\n' ' ' <<<"$out")"
+  else
+    notify '󰄬' 'Meeting saved' 'voxtype meeting show latest'
+  fi
+}
+
+command -v voxtype >/dev/null || die 'voxtype is not installed'
+
+case "${1:-toggle}" in
+  toggle)
+    case "$(state)" in
+      idle) start ;;
+      # A paused meeting is still a meeting: stop it rather than starting a
+      # second one, which voxtype would refuse anyway.
+      *)    stop  ;;
+    esac
+    ;;
+  start)  start ;;
+  stop)   stop ;;
+  panel)  panel ;;
+  status) state ;;
+  -h|--help|help)
+    sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *) die "unknown command: $1 (try: toggle, start, stop, status, panel)" ;;
+esac

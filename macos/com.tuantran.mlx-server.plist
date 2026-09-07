@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tuantran.mlx-server</string>
+
+	<!-- The measurable alternative to llama.cpp, kept deliberately optional
+	     (install.sh --with-mlx; benchmark only). mlx_lm.server speaks
+	     /v1/chat/completions on 8089 so both backends can run side by side
+	     for bench-cleanup.sh. It has NO /health endpoint and unreliable
+	     cross-request prefix caching -- the two reasons llama.cpp stays the
+	     default. Reached through the filter's `openai` arm, which skips the
+	     /health probe and does not send cache_prompt:
+	       VOXTYPE_CLEANUP_BACKEND=openai
+	       VOXTYPE_CLEANUP_ENDPOINT=http://127.0.0.1:8089
+	     First start downloads mlx-community/Qwen3-4B-Instruct-2507-4bit
+	     (~2.4 GB) into ~/.cache/huggingface. __HOME__ is substituted by
+	     install.sh. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/.local/bin/mlx_lm.server</string>
+		<string>--model</string>
+		<string>mlx-community/Qwen3-4B-Instruct-2507-4bit</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>8089</string>
+	</array>
+
+	<!-- See the llama-server plist: Homebrew/uv are not on launchd's PATH,
+	     and the uv tool shim needs its venv python reachable by absolute
+	     path (which it computes itself, but not under a stripped PATH). -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<key>StandardOutPath</key>
+	<string>__HOME__/Library/Logs/voxtype-mlx-server.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/voxtype-mlx-server.log</string>
+</dict>
+</plist>

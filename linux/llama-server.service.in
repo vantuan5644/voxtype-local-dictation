@@ -1,0 +1,53 @@
+[Unit]
+Description=llama.cpp server (Qwen3-4B-Instruct-2507) for voxtype dictation cleanup
+Documentation=https://github.com/vantuan5644/voxtype-local-dictation/blob/main/docs/install-linux.md
+# Bound to the session exactly like the voxtype daemon, which is the only
+# thing that talks to it. Logging out frees the VRAM/RAM the model holds
+# rather than leaving it parked for a session nobody is dictating in.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+Environment=LLAMA_MODEL=__LLAMA_MODEL__
+__DEVICE_GUARD__
+
+# --ctx-size is NOT optional. llama-server defaults to 0, meaning "whatever
+# the model was trained for", and Qwen3-2507 advertises 262144 -- which would
+# size the KV cache for a context dictation can never reach
+# (audio.max_duration_secs caps one at roughly 240 tokens). 4096 is already
+# generous and keeps room for the meeting summarizer's chunks.
+#
+# --temp 0 because this is copy-editing under a "never add a word" rule,
+# where sampling entropy is pure downside. It also makes the guards in
+# voxtype-cleanup testable: the same dictation cleans the same way every
+# time.
+ExecStart=__LLAMA_BIN__ \
+  --model ${LLAMA_MODEL} \
+  --alias qwen3-4b-instruct-2507 \
+  --host 127.0.0.1 --port 8088 \
+  __DEVICE_FLAGS__ \
+  --ctx-size 4096 --parallel 1 \
+  --temp 0 --no-webui
+
+Restart=on-failure
+RestartSec=5
+
+# llama-server has no authentication. --host above already binds loopback;
+# this is the belt to that braces.
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+# ProtectSystem=strict makes the whole hierarchy read-only, $HOME included.
+# Mesa writes its Vulkan shader cache under ~/.cache and a cold cache costs
+# seconds of recompilation on every start, so that one path stays writable.
+ReadWritePaths=%h/.cache
+
+[Install]
+WantedBy=graphical-session.target

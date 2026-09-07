@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+#
+# Preflight + exec wrapper for the com.tuantran.llama-server LaunchAgent.
+# launchd has no ExecStartPre (the systemd unit this replaces had one), so
+# the two checks that unit performed live here instead -- see
+# the systemd unit this replaces had one -- see linux/llama-server.service.in
+# and docs/install-linux.md.
+#
+# Both checks refuse to start rather than letting the server come up degraded:
+# the whole point is that a wrong start is visible, never a silent CPU
+# fallback whose only symptom would be "dictation cleanup got slow".
+#
+# They exit 0, not 1, and that is deliberate. The agent carries
+# KeepAlive={SuccessfulExit:false}, which restarts on any NON-zero exit --
+# and launchd has no StartLimitBurst, so a non-zero exit here would respawn
+# every 10 seconds forever, appending to the log until something fills. The
+# systemd unit could fail loudly and STOP; launchd cannot. Exiting 0 makes it
+# stay stopped, and the reason sits at the top of the log where the
+# verification step in the guide looks for it. The filter is unharmed either
+# way: a refused connection costs it ~9 ms and it passes the raw text
+# through, which is the one rule.
+set -euo pipefail
+
+MODEL="$HOME/.local/share/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+
+# Q4_K_M, not the Q8 the Linux reference setup holds: that machine has 23 GB of VRAM;
+# this one has 16 GB *unified*, shared with the OS, browser and editor. Q4_K_M
+# is ~2.5 GB against Q8's ~4.3 GB, and with whisper's ~1.6 GB that is ~4.1 GB
+# resident instead of ~6 GB. The job is copy-editing at --temp 0 under a
+# never-add-a-word rule with four structural guards behind it, which is where
+# a smaller quant is safest.
+if [[ ! -f $MODEL ]]; then
+  echo "llama-server-run: cleanup model missing: $MODEL" >&2
+  echo "  hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q4_K_M.gguf \\" >&2
+  echo "     --local-dir ~/.local/share/models" >&2
+  exit 0
+fi
+
+# Assert a Metal device is present before exec'ing. On the Linux box this was
+# "grep --list-devices for Vulkan0: NVIDIA" -- there were two Vulkan devices
+# and --device names them by enumeration index, so a flipped order would have
+# parked the model on the iGPU with no visible error. On macOS there is one
+# unified GPU and nothing to mis-enumerate, but the check still earns its
+# keep in the other direction: a llama-server that cannot get Metal comes up
+# on the CPU cheerfully, and the only symptom is cleanup latency.
+# Ask llama-server, NOT the system. `system_profiler SPDisplaysDataType` was
+# the first attempt and it is wrong twice over: it hangs indefinitely under
+# launchd (observed -- the agent sat at 0% CPU with an empty log and never
+# reached llama-server at all, because system_profiler needs a window-server
+# round trip a background agent does not get), and it answers the wrong
+# question. What matters is whether *llama-server* enumerates a Metal device,
+# which is exactly what doc 20's `Vulkan0: NVIDIA` grep asked on Linux.
+# --list-devices costs 0.13s against system_profiler's 0.5s interactive.
+if ! llama-server --list-devices 2>/dev/null | grep -q 'MTL'; then
+  echo "llama-server-run: llama-server enumerates no Metal device; refusing to start." >&2
+  echo "  It would fall back to the CPU silently -- that failure mode must be" >&2
+  echo "  loud, not a cleanup that quietly got 10x slower." >&2
+  echo "  Check: llama-server --list-devices" >&2
+  exit 0
+fi
+
+# Flags carried over from the systemd unit, minus the Vulkan ones:
+#   --ctx-size 4096   mandatory, not tuning -- llama-server defaults to 0,
+#                     "whatever the model was trained for", and Qwen3-2507
+#                     advertises 262144, which would size the KV cache for a
+#                     context dictation can never reach (audio.max_duration_secs
+#                     caps a dictation at roughly 240 tokens)
+#   --temp 0          copy-editing under a "never add a word" rule; sampling
+#                     entropy is pure downside, and it makes the guards
+#                     testable -- the same dictation cleans the same way
+#   --parallel 1      one consumer: the filter
+#   --alias           the name voxtype-cleanup sends as `model`
+#   --no-webui        nobody is browsing it
+# There is no launchd analogue of the unit's sandbox keys (IPAddressDeny,
+# ProtectSystem, ReadWritePaths); --host 127.0.0.1 below is the remaining
+# control and the guide says so rather than pretending parity.
+exec llama-server \
+  --model "$MODEL" \
+  --alias qwen3-4b-instruct-2507 \
+  --host 127.0.0.1 --port 8088 \
+  --ctx-size 4096 --parallel 1 \
+  --temp 0 --no-webui

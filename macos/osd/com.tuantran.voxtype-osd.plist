@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tuantran.voxtype-osd</string>
+
+	<!-- The macOS OSD runs as its OWN agent, not as the daemon's
+	     voxtype-osd child. Upstream's supervisor resolves the child as a
+	     sibling of the daemon executable -- inside the sealed
+	     /Applications/Voxtype.app bundle, where adding a file breaks the
+	     code signature the TCC grants anchor on -- or on the daemon's PATH,
+	     which under Login Items excludes ~/.local/bin. Neither path can
+	     reach a binary we install. A LaunchAgent is safe here precisely
+	     because a renderer needs no TCC grant of any kind: the
+	     responsible-process rule that blocks a launchd daemon's microphone
+	     grant does not apply to something that only draws a window and
+	     reads a socket. The binary is named voxtype-osd-macos (not
+	     voxtype-osd) so the supervisor's PATH fallback can never find -- and
+	     double-spawn -- it. __HOME__ is substituted by install.sh. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/.local/bin/voxtype-osd-macos</string>
+	</array>
+
+	<!-- No EnvironmentVariables: nothing is shelled out -- config comes
+	     from ~/.config/voxtype/config.toml, the socket and state file from
+	     the daemon's own defaults -- so launchd's minimal PATH is fine. -->
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Restart=on-failure analogue. The binary never exits on transient
+	     conditions (socket absent, daemon restart, screen changes): it
+	     reconnects in-process, so a non-zero exit here means a real bug,
+	     worth exactly one restart rather than a crash-loop. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<!-- Interactive, NOT the Adaptive that com.tuantran.llama-server.plist
+	     uses: `man launchd.plist` defines Adaptive as moving between the
+	     Background and Interactive classifications "based on activity over
+	     XPC connections", and this process has no XPC connections at all --
+	     it reads a Unix socket -- so Adaptive would pin it at Background and
+	     throttle a 60 fps renderer. "Interactive jobs run with the same
+	     resource limitations as apps, that is to say, none", which is what
+	     drawing a panel over the frontmost window actually is. Upstream's own
+	     io.voxtype.daemon.plist reaches the same conclusion. -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+
+	<!-- The only job in this repo that sets it, and it earns it: a no-op for
+	     the way install.sh loads this (bootstrap into gui/$UID, which IS the
+	     Aqua session), but it fails CLOSED if anyone ever loads the plist
+	     into user/$UID or over SSH. Without it the binary would start there
+	     with no window server and die into a KeepAlive loop; with it, launchd
+	     simply does not load the job. -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+
+	<key>StandardOutPath</key>
+	<string>__HOME__/Library/Logs/voxtype-osd.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/voxtype-osd.log</string>
+</dict>
+</plist>
