@@ -79,6 +79,28 @@ runsh() { # runsh <description> <shell-snippet>
   if (( DRY_RUN )); then note "[dry] $1"; else bash -c "$2"; fi
 }
 
+# A path as it should appear INSIDE the unit file, which is not the same
+# string as the path this script tests with [[ -f ]]. Two reasons it differs:
+#
+#   * %h, systemd's own home specifier. The hand-written unit this template
+#     replaces used it, and it is worth keeping -- a literal /home/<user>
+#     baked into a unit is one more thing to fix when the account moves, and
+#     this repo already has hosts whose checkouts live under three different
+#     usernames.
+#   * %% for a literal percent. systemd reads a bare % as the start of a
+#     specifier, so an unescaped one in a model filename would either expand
+#     to something unintended or fail the unit at load. Rare, silent, and
+#     free to prevent.
+unit_path() { # unit_path <absolute-path>  ->  value safe to paste into a unit
+  local p=$1 rest
+  if [[ $p == "$HOME"/* ]]; then
+    rest="${p#"$HOME"/}"
+    printf '%%h/%s' "${rest//%/%%}"
+  else
+    printf '%s' "${p//%/%%}"
+  fi
+}
+
 # ------------------------------------------------------------- uninstall ---
 if (( UNINSTALL )); then
   say "Uninstalling the voxtype dictation payload"
@@ -142,6 +164,11 @@ fi
 HAVE_LLAMA=0
 if command -v llama-server >/dev/null 2>&1; then
   HAVE_LLAMA=1
+  LLAMA_BIN="$(command -v llama-server)"
+  # Resolved once, here, so the ExecStartPre guard and ExecStart below can
+  # never disagree about which binary they mean.
+  LLAMA_BIN_UNIT="$(unit_path "$LLAMA_BIN")"
+  LLAMA_MODEL_UNIT="$(unit_path "$LLAMA_MODEL")"
   note "llama-server on PATH"
 else
   # ggml-cpu is not optional and its absence is not obvious: every ggml
@@ -208,7 +235,7 @@ if (( HAVE_LLAMA )); then
     # a live temperature).
     vendor="$(grep -E "^  ${DEVICE}: " <<<"$listing" | head -1 | sed -E "s/^  ${DEVICE}: ([A-Za-z0-9]+).*/\1/" || true)"
     if [[ -n $vendor ]]; then
-      DEVICE_GUARD="ExecStartPre=/bin/sh -c '$(command -v llama-server) --list-devices | grep -q \"^  ${DEVICE}: ${vendor}\" || { echo \"${DEVICE} is no longer the ${vendor} GPU -- enumeration order changed; check llama-server --list-devices\"; exit 1; }'"
+      DEVICE_GUARD="ExecStartPre=/bin/sh -c '$LLAMA_BIN_UNIT --list-devices | grep -q \"^  ${DEVICE}: ${vendor}\" || { echo \"${DEVICE} is no longer the ${vendor} GPU -- enumeration order changed; check llama-server --list-devices\"; exit 1; }'"
     fi
     DEVICE_FLAGS="--device $DEVICE --n-gpu-layers 999"
     note "device: $DEVICE ($vendor), with an ExecStartPre guard against enumeration flips"
@@ -217,13 +244,13 @@ if (( HAVE_LLAMA )); then
   fi
 
   unit="$(cat "$SRC/llama-server.service.in")"
-  unit="${unit//__LLAMA_BIN__/$(command -v llama-server)}"
-  unit="${unit//__LLAMA_MODEL__/$LLAMA_MODEL}"
+  unit="${unit//__LLAMA_BIN__/$LLAMA_BIN_UNIT}"
+  unit="${unit//__LLAMA_MODEL__/$LLAMA_MODEL_UNIT}"
   unit="${unit//__DEVICE_GUARD__/$DEVICE_GUARD}"
   unit="${unit//__DEVICE_FLAGS__/$DEVICE_FLAGS}"
   if (( DRY_RUN )); then
     note "[dry] render $UNITS/$UNIT_NAME from llama-server.service.in"
-    note "[dry]   device='$DEVICE' model='$LLAMA_MODEL' guard=$([[ -n $DEVICE_GUARD ]] && echo yes || echo no)"
+    note "[dry]   device='$DEVICE' model='$LLAMA_MODEL_UNIT' guard=$([[ -n $DEVICE_GUARD ]] && echo yes || echo no)"
     note "[dry] systemctl --user daemon-reload + enable --now $UNIT_NAME"
   else
     mkdir -p "$UNITS"
