@@ -196,6 +196,18 @@ run install -m 755 "$SRC/voxtype-notify" "$BIN/voxtype-notify"
 # restated here -- add a term in vocabulary.conf and re-run.
 run install -m 755 "$ROOT/voxtype-vocab" "$BIN/voxtype-vocab"
 run install -m 644 "$ROOT/vocabulary.conf" "$CONF_DIR/vocabulary.conf"
+# The two facts `voxtype-vocab add|edit|apply` needs and the read path never
+# does: which vocabulary.conf is the SOURCE (the repo copy -- editing the copy
+# installed just above is reverted by the next run), and how to apply it on this
+# host. Recorded here rather than hardcoded in voxtype-vocab, which is shared
+# with the macOS install and the Omarchy one, each of which applies differently.
+runsh "record the vocabulary source + apply command in $CONF_DIR/vocab-source.conf" \
+  "printf '%s\n' \
+     \"# Written by linux/install.sh. Read (never sourced) by voxtype-vocab's\" \
+     '# write path -- see that script'\"'\"'s header. Regenerated on every run.' \
+     'VOXTYPE_VOCAB_SOURCE=$ROOT/vocabulary.conf' \
+     'VOXTYPE_VOCAB_APPLY=$SRC/install.sh' \
+     > '$CONF_DIR/vocab-source.conf' && chmod 644 '$CONF_DIR/vocab-source.conf'"
 
 if (( HAVE_VOXTYPE )); then
   # Silero VAD, needed by vad.backend=whisper below. Without it a near-silent

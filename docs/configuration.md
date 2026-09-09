@@ -128,8 +128,38 @@ and never into a prompt. Two consumers read it through one parser
 
 Default to `[misspelled]` (whisper hears it right and writes it wrong, as with
 "pytorch"); promote a term to `[misheard]` only after watching whisper turn
-it into *different words* ("butter FS" for btrfs). After editing, re-run the
-installer for the host to push the `[misheard]` half into
+it into *different words* ("butter FS" for btrfs).
+
+### Adding a term
+
+`voxtype-vocab` is both the parser and the maintenance command:
+
+```bash
+voxtype-vocab add btrfs        # -> [misspelled], then applies
+voxtype-vocab add -m Hyprland  # -> [misheard] instead
+voxtype-vocab add -n foo bar   # several terms, skip the apply
+voxtype-vocab edit             # $EDITOR on the source, applies if it changed
+voxtype-vocab apply            # just re-apply
+voxtype-vocab list             # both sections, with counts and resolved paths
+voxtype-vocab path             # where the source is, and how apply runs
+```
+
+It edits the **source** copy in the checkout, not the installed
+`~/.config/voxtype/vocabulary.conf`. That distinction is the reason the command
+exists: editing the installed copy looks like it works, because the cleanup
+filter re-reads it on the very next dictation, and is then silently reverted
+the next time the installer runs. Duplicates are refused case-insensitively,
+and the 40-term `[misheard]` warning fires as you spend the budget.
+
+Applying is still "re-run the installer for this host" — the installer records
+which one, and where the source lives, in
+`~/.config/voxtype/vocab-source.conf` as it installs. `voxtype-vocab path`
+prints what it resolved; `VOXTYPE_VOCAB_SOURCE` and `VOXTYPE_VOCAB_APPLY`
+override it. Nothing host-specific is baked into the script, so the same one
+works on Omarchy (`apply.sh --only voxtype`), Linux and macOS.
+
+Doing it by hand is unchanged: edit the checkout's `vocabulary.conf` and re-run
+the installer. The `[misheard]` half needs that re-run to reach
 `whisper.initial_prompt`; the cleanup half goes live the moment the file is
 saved.
 
