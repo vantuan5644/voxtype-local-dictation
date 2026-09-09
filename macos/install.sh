@@ -704,6 +704,22 @@ done
 run install -m 755 "$SHARED_VOXTYPE/voxtype-vocab" "$BIN/voxtype-vocab"
 runsh "install vocabulary.conf into ~/.config/voxtype" \
   "mkdir -p '$HOME/.config/voxtype' && install -m 644 '$SHARED_VOXTYPE/vocabulary.conf' '$HOME/.config/voxtype/vocabulary.conf'"
+# The two facts `voxtype-vocab add|edit|apply` needs and the read path never
+# does: which vocabulary.conf is the SOURCE (the repo copy -- editing the copy
+# installed just above is reverted by the next run), and how to apply it on this
+# host. Recorded here rather than hardcoded in voxtype-vocab, which is shared
+# with the Linux install and the Omarchy one, each of which applies differently.
+# No flags recorded: Phase 1 skips the download when the version already matches
+# and the builds skip when up to date, so a plain re-run is the cheap path, and
+# --with-osd/--with-meeting work already installed are left alone rather than
+# undone.
+runsh "record the vocabulary source + apply command in ~/.config/voxtype/vocab-source.conf" \
+  "printf '%s\n' \
+     \"# Written by macos/install.sh. Read (never sourced) by voxtype-vocab's\" \
+     '# write path -- see that script'\"'\"'s header. Regenerated on every run.' \
+     'VOXTYPE_VOCAB_SOURCE=$SHARED_VOXTYPE/vocabulary.conf' \
+     'VOXTYPE_VOCAB_APPLY=$SRC/install.sh' \
+     > '$HOME/.config/voxtype/vocab-source.conf' && chmod 644 '$HOME/.config/voxtype/vocab-source.conf'"
 
 # Build the OSD before the config loop, so the notification decision below
 # reflects a binary that actually exists. Compiled to a temp name and moved
