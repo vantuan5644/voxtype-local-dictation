@@ -220,6 +220,7 @@ internal sealed class BootstrapForm : Form
         Uri uri;
         if (!Uri.TryCreate(url, UriKind.Absolute, out uri) || uri.Scheme != "https")
             throw new InstallException(20, "Download URL must use HTTPS.");
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
         var partial = destination + ".partial";
         var existing = File.Exists(partial) ? new FileInfo(partial).Length : 0L;
         var request = (HttpWebRequest)WebRequest.Create(uri);
