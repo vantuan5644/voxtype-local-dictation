@@ -6,28 +6,31 @@ the shared vocabulary file.
 
 ## The asserted voxtype keys
 
-Both installers run a `get → compare → set` loop over exactly these keys.
+The platform setup runs a `get → compare → set` loop over exactly these keys.
 Nothing else is touched, because voxtype rewrites the whole `config.toml` on
 every `config set` and every `voxtype configure` save, so asserting a snapshot
-would revert the engine, model, GPU, and OSD choices you make in the TUI
-later. That is also why `whisper.model` is deliberately absent: choose it
-through the TUI and it survives every re-run.
+would revert later engine, model, GPU, and OSD choices. macOS and Linux leave
+`whisper.model` to the TUI. The Windows wizard sets the exact verified model
+path and selected microphone; later setup runs preserve both unless the user
+selects replacements.
 
-| Key | macOS | Linux | Why |
-|---|---|---|---|
-| `hotkey.enabled` / `hotkey.mode` | `true` / `push_to_talk` | same | the whole point |
-| `hotkey.key` | `FN` | `RIGHTALT` | fn is free on macOS (no chord modifier: no keypress while held can close a window); Right Alt stays reachable and VAD makes its stray modifier-presses harmless |
-| `whisper.language` | `en` | `en` | bilingual values were tried and reverted |
-| `text.filter_filler_words` | `true` | same | voxtype's own stripper; free, and still works when the cleanup times out |
-| `vad.enabled` / `vad.backend` | `true` / `whisper` | same | Silero VAD rejects silence-only recordings before they reach whisper, the guard that makes stray presses harmless |
-| `meeting.enabled` | follows `--with-meeting` | `true` | off when the shim is absent, because a meeting that silently records only your own half is worse than a loud refusal |
-| `audio.pause_media` | `false` | `false` | replaced by ducking (below) |
-| `audio.duck_media` | — | `true` | lower other streams instead of stopping them: no music bleed into the mic, and a stray chord costs a dip-and-recover rather than a pause/resume |
-| `audio.duck_media_volume_percent` | — | `10` | an **amplitude** percent, not the pactl meter number (pactl shows the cube root, so 10 lands at −20 dB) |
-| `output.notification.on_recording_{start,stop}` | off with the OSD, on without | `false` | with a live OSD panel they are redundant; on Linux Right-Alt chords fired them constantly |
-| `osd.enabled` | `false` | `true` | on macOS `false` means "the daemon must not spawn a frontend", and the OSD runs as its own LaunchAgent reading the daemon's socket feed; on Linux the daemon's own OSD is the feedback channel |
-| `output.post_process.command` | `~/.local/bin/voxtype-cleanup` | same | the cleanup filter |
-| `whisper.initial_prompt` | **generated** | **generated** | built from `[misheard]` in `vocabulary.conf` (see below) |
+| Key | macOS | Linux | Windows | Why |
+|---|---|---|---|---|
+| `hotkey.enabled` / `hotkey.mode` | `true` / `push_to_talk` | same | enabled only with `-Hotkey` / `push_to_talk` | Windows requires an explicit user choice |
+| `hotkey.key` | `FN` | `RIGHTALT` | user-selected | avoids an implicit Windows-wide key choice |
+| `whisper.language` | `en` | `en` | `en` | bilingual values were tried and reverted |
+| `whisper.model` | user-selected | user-selected | wizard-managed local path | Windows verifies the pinned file before saving it |
+| `audio.device` | user-selected | user-selected | wizard-selected or Windows default | device names come from the daemon when available |
+| `text.filter_filler_words` | `true` | same | same | voxtype's own stripper still works when cleanup times out |
+| `vad.enabled` / `vad.backend` | `true` / `whisper` | same | same | Silero VAD rejects silence-only recordings |
+| `meeting.enabled` | follows `--with-meeting` | `true` | `false` | unsupported capture must refuse clearly |
+| `audio.pause_media` | `false` | `false` | `false` | media integration is platform-owned |
+| `audio.duck_media` | — | `true` | — | Linux lowers other streams while recording |
+| `audio.duck_media_volume_percent` | — | `10` | — | Linux amplitude percentage |
+| `output.notification.on_recording_{start,stop}` | off with the OSD, on without | `false` | `true` | Windows v1 uses notifications for recording feedback |
+| `osd.enabled` | `false` | `true` | `false` | Windows OSD is deferred |
+| `output.post_process.command` | `~/.local/bin/voxtype-cleanup` | same | `voxtype-local.exe cleanup` | the guarded cleanup filter |
+| `whisper.initial_prompt` | **generated** | **generated** | **generated** | built from `[misheard]` in `vocabulary.conf` (see below) |
 
 Report-only (rejected by `config set`, so the installers warn instead of
 set): `output.post_process.timeout_ms = 60000`. Add it under
@@ -162,6 +165,19 @@ Doing it by hand is unchanged: edit the checkout's `vocabulary.conf` and re-run
 the installer. The `[misheard]` half needs that re-run to reach
 `whisper.initial_prompt`; the cleanup half goes live the moment the file is
 saved.
+
+### Windows
+
+The Windows package keeps the active file at
+`%APPDATA%\VoxType\vocabulary.conf`. It has no separate checkout-owned source:
+the installed starter is copied once and every later edit belongs to the user.
+Use `voxtype-local vocab` in place of `voxtype-vocab`. Its `add`, `edit`,
+`list`, `path`, and `apply` commands preserve the same section rules; `apply`
+writes `[misheard]` directly with `voxtype config set whisper.initial_prompt`.
+
+The cleanup environment variables and defaults in this document are identical
+on Windows. The configured post-process command is `voxtype-local.exe cleanup`,
+and the local server still listens only on `http://127.0.0.1:8088`.
 
 Per-project terms do not belong in this file at all; use
 `VOXTYPE_CLEANUP_CONTEXT`.

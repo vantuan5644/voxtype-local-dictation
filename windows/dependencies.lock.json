@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "voxtype": {
+    "version": "1.0.1-windows.1",
+    "sourceRevision": "ba37799bcc12d8e0daca173fb962a56f27ca81ad",
+    "url": "https://github.com/vantuan5644/voxtype/releases/download/v1.0.1-windows.1/voxtype-v1.0.1-windows.1-x64-vulkan.zip",
+    "sha256": "f26c451370435ae88ce5314dbd7b38838e31277a28e47bae5ae025510dee4b7c",
+    "archiveEntry": "voxtype.exe"
+  },
+  "llamaCpp": {
+    "version": "b10635",
+    "sourceRevision": "fc35562ba46fbbf8e30cac85edbb39642c37d248",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10635/llama-b10635-bin-win-vulkan-x64.zip",
+    "sha256": "388964372f65f71a5268e8c65bb2a57576ede88a8495897aa194c95c792a6820",
+    "archiveEntry": "llama-server.exe"
+  },
+  "models": [
+    {
+      "id": "whisper",
+      "name": "Whisper Large v3 Turbo Q5",
+      "fileName": "ggml-large-v3-turbo-q5_0.bin",
+      "sourceRevision": "98aa99a0a9db05ae2342309f5096248665f7cba3",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/98aa99a0a9db05ae2342309f5096248665f7cba3/ggml-large-v3-turbo-q5_0.bin?download=true",
+      "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
+    },
+    {
+      "id": "cleanup",
+      "name": "Qwen3 4B Instruct 2507 Q4_K_M",
+      "fileName": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "sourceRevision": "18727206c51467496bfba014368bd0a30e97f411",
+      "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/18727206c51467496bfba014368bd0a30e97f411/Qwen3-4B-Instruct-2507-Q4_K_M.gguf?download=true",
+      "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+      "size": 2497281120
+    }
+  ],
+  "tools": [
+    {
+      "id": "Microsoft.WindowsSDK.10.0.26100",
+      "command": "makeappx.exe",
+      "sourceBuildOnly": false
+    },
+    {
+      "id": "Rustlang.Rustup",
+      "command": "cargo.exe",
+      "sourceBuildOnly": true
+    },
+    {
+      "id": "Microsoft.VisualStudio.2022.BuildTools",
+      "command": "cl.exe",
+      "sourceBuildOnly": true,
+      "override": "--wait --quiet --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+    },
+    {
+      "id": "Kitware.CMake",
+      "command": "cmake.exe",
+      "sourceBuildOnly": true
+    },
+    {
+      "id": "Ninja-build.Ninja",
+      "command": "ninja.exe",
+      "sourceBuildOnly": true
+    },
+    {
+      "id": "KhronosGroup.VulkanSDK",
+      "command": "glslc.exe",
+      "sourceBuildOnly": true
+    }
+  ]
+}

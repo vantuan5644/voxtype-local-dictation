@@ -1,0 +1,101 @@
+name: windows-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*-windows.*']
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  windows-x64-vulkan:
+    runs-on: windows-latest
+    env:
+      # Keep whisper.cpp's generated Vulkan shader paths within MSBuild's
+      # legacy path limit.
+      CARGO_TARGET_DIR: C:\vt
+      # whisper-rs-sys bundles a cmake crate that predates the Visual Studio 2026
+      # generator name used by the current Windows image.
+      CMAKE_GENERATOR: Ninja
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install vulkan-sdk ninja --yes --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw 'Vulkan SDK installation failed after three attempts' }
+            Start-Sleep -Seconds (15 * $attempt)
+          }
+          $sdk = Get-ChildItem C:\VulkanSDK -Directory |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+          if (-not $sdk) { throw 'Vulkan SDK installation directory was not found' }
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File $env:GITHUB_ENV -Append
+          "$($sdk.FullName)\Bin" | Out-File $env:GITHUB_PATH -Append
+
+      - name: Lint Windows targets
+        shell: pwsh
+        run: cargo clippy --locked --all-targets --no-deps -- -D warnings
+
+      - name: Test Windows targets
+        shell: pwsh
+        run: cargo test --locked --all-targets
+
+      - name: Build Windows Vulkan release
+        shell: pwsh
+        run: cargo build --locked --release --features gpu-vulkan
+
+      - name: Assemble artifact
+        id: artifact
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.ref_type }}' -eq 'tag') {
+            '${{ github.ref_name }}'
+          } else {
+            'ci-${{ github.sha }}'.Substring(0, 11)
+          }
+          $name = "voxtype-$tag-x64-vulkan"
+          $directory = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\voxtype.exe') $directory
+          Copy-Item ./LICENSE $directory
+          $archive = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Compress-Archive -Path (Join-Path $directory '*') -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content "$archive.sha256" -Encoding ascii
+          "archive=$archive" | Out-File $env:GITHUB_OUTPUT -Append
+          "checksum=$archive.sha256" | Out-File $env:GITHUB_OUTPUT -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voxtype-windows-x64-vulkan
+          path: |
+            ${{ steps.artifact.outputs.archive }}
+            ${{ steps.artifact.outputs.checksum }}
+
+      - uses: actions/attest-build-provenance@v2
+        if: github.ref_type == 'tag'
+        with:
+          subject-path: ${{ steps.artifact.outputs.archive }}
+
+      - name: Publish fork release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create '${{ github.ref_name }}' --generate-notes
+          '${{ steps.artifact.outputs.archive }}'
+          '${{ steps.artifact.outputs.checksum }}'
