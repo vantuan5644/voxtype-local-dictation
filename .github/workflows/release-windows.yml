@@ -1,0 +1,143 @@
+name: release-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Four-part MSIX version, such as 1.0.1.0
+        required: true
+        type: string
+  push:
+    tags:
+      - 'windows-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: voxtype-windows-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    environment: windows-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $version = '${{ inputs.version }}'
+          if (-not $version) {
+            $version = '${{ github.ref_name }}' -replace '^windows-v', ''
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "version must contain four numeric components: $version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_tag=windows-v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Prepare pinned payload
+        shell: pwsh
+        run: >-
+          ./windows/prepare-windows-release.ps1 -Apply
+          -OutputDirectory $env:RUNNER_TEMP/voxtype-payload
+
+      - name: Import release certificate
+        id: signing
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if (-not $env:PFX_BASE64 -or -not $env:PFX_PASSWORD) {
+            throw 'Windows signing secrets are required'
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'voxtype-signing.pfx'
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:PFX_BASE64))
+          $password = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $password -Exportable:$false
+          $publicPath = Join-Path $env:RUNNER_TEMP 'voxtype-signing.cer'
+          Export-Certificate -Cert $certificate -FilePath $publicPath -Type CERT | Out-Null
+          Import-Certificate -FilePath $publicPath `
+            -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+          "publisher=$($certificate.Subject)" >> $env:GITHUB_OUTPUT
+          "pfx=$path" >> $env:GITHUB_OUTPUT
+
+      - name: Build signed MSIX
+        shell: pwsh
+        run: |
+          ./windows/build-msix.ps1 -PayloadDirectory $env:RUNNER_TEMP/voxtype-payload `
+            -Version '${{ steps.version.outputs.version }}' `
+            -CertificateThumbprint '${{ steps.signing.outputs.thumbprint }}'
+
+      - name: Build signed bootstrap
+        shell: pwsh
+        env:
+          SIGNING_PUBLISHER: ${{ steps.signing.outputs.publisher }}
+          SIGNING_THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          ./windows/build-bootstrap.ps1 `
+            -MsixPath "./windows/dist/voxtype-$version-windows-x64.msix" `
+            -Version $version -Publisher $env:SIGNING_PUBLISHER `
+            -ReleaseTag '${{ steps.version.outputs.release_tag }}' `
+            -CertificateThumbprint $env:SIGNING_THUMBPRINT
+
+      - name: Export public signing certificate
+        id: public_certificate
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $thumbprint = '${{ steps.signing.outputs.thumbprint }}'
+          $name = "VoxType-$version-signing.cer"
+          $path = Join-Path './windows/dist/release' $name
+          Export-Certificate -Cert "Cert:\CurrentUser\My\$thumbprint" `
+            -FilePath $path -Type CERT | Out-Null
+          $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+          Add-Content -LiteralPath './windows/dist/release/SHA256SUMS.txt' `
+            -Value "$digest  $name" -Encoding utf8
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.release_tag }}'
+          $version = '${{ steps.version.outputs.version }}'
+          $release = './windows/dist/release'
+          $certificate = '${{ steps.public_certificate.outputs.name }}'
+          $thumbprint = '${{ steps.signing.outputs.thumbprint }}'
+          $notes = @(
+            "Signing certificate: $certificate"
+            "Certificate thumbprint (SHA-1): $thumbprint"
+          ) -join "`n"
+          gh release create $tag --title "VoxType Windows $version" --notes $notes `
+            "$release/VoxTypeSetup-$version-x64.exe" `
+            "$release/VoxType-$version-x64.msix" `
+            "$release/$certificate" `
+            "$release/release-manifest.json" `
+            "$release/SHA256SUMS.txt" `
+            "$release/THIRD_PARTY_NOTICES.txt" `
+            "$release/LICENSES/MIT.txt" `
+            "$release/LICENSES/Apache-2.0.txt"
+
+      - name: Remove signing material
+        if: always()
+        shell: pwsh
+        run: |
+          $thumbprint = '${{ steps.signing.outputs.thumbprint }}'
+          if ($thumbprint) {
+            Remove-Item "Cert:\CurrentUser\My\$thumbprint" -Force -ErrorAction SilentlyContinue
+            Remove-Item "Cert:\LocalMachine\TrustedPeople\$thumbprint" `
+              -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'voxtype-signing.pfx') `
+            -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'voxtype-signing.cer') `
+            -Force -ErrorAction SilentlyContinue

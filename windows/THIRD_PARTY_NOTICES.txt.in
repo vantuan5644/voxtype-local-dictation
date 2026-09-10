@@ -1,0 +1,25 @@
+VoxType Windows distribution - third-party notices
+==================================================
+
+VoxType
+Copyright its contributors. Licensed under the MIT License.
+Source: https://github.com/peteonrails/voxtype
+Windows fork: https://github.com/vantuan5644/voxtype
+
+llama.cpp
+Copyright its contributors. Licensed under the MIT License.
+Source: https://github.com/ggml-org/llama.cpp
+
+whisper.cpp model files
+Copyright its contributors. Licensed under the MIT License.
+Source: https://huggingface.co/ggerganov/whisper.cpp
+
+Qwen3-4B-Instruct-2507-GGUF
+Qwen model material is licensed under Apache License 2.0.
+Source: https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF
+
+Exact source revisions and file digests are recorded in payload-manifest.json
+and dependencies.lock.json in each release.
+
+Complete MIT and Apache License 2.0 texts are included in the LICENSES
+directory.
