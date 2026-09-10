@@ -13,6 +13,7 @@ $serverScript = Join-Path $windowsRoot 'voxtype-server.ps1'
 $builder = Join-Path $windowsRoot 'build-msix.ps1'
 $preparer = Join-Path $windowsRoot 'prepare-windows-release.ps1'
 $bootstrapBuilder = Join-Path $windowsRoot 'build-bootstrap.ps1'
+$bootstrapSource = Join-Path $windowsRoot 'packaging\BootstrapInstaller.cs'
 $offlineBuilder = Join-Path $windowsRoot 'build-offline-bundle.ps1'
 $dependencyLock = Join-Path $windowsRoot 'dependencies.lock.json'
 $releaseWorkflow = Join-Path $windowsRoot 'release-windows.yml'
@@ -108,6 +109,13 @@ try {
         $failures.Add('release workflow does not trust the self-signed certificate during verification')
     }
 } catch { $failures.Add("release workflow failed to parse: $($_.Exception.Message)") }
+try {
+    $bootstrapSourceText = Get-Content -LiteralPath $bootstrapSource -Raw
+    if ($bootstrapSourceText -notmatch
+            'ServicePointManager\.SecurityProtocol\s*\|=\s*SecurityProtocolType\.Tls12') {
+        $failures.Add('bootstrap downloader does not explicitly enable TLS 1.2')
+    }
+} catch { $failures.Add("bootstrap source failed to parse: $($_.Exception.Message)") }
 
 function Start-FakeCleanupServer {
     param([string]$ResponseText)
