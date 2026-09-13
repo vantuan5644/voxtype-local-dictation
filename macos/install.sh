@@ -412,6 +412,12 @@ install_agent() { # install_agent <template> <label>
     sleep 0.1; i=$((i+1))
   done
 
+  # `voxtype-power off` leaves the job DISABLED, and launchd refuses to
+  # bootstrap a disabled job ("Bootstrap failed: 5: Input/output error"), so a
+  # re-run after it would only report "did not load". Installing means the
+  # agent starts at login again, so clear the flag first.
+  launchctl enable "gui/$UID_N/$label"
+
   local _
   for _ in 1 2 3; do
     if launchctl bootstrap "gui/$UID_N" "$dst" 2>/dev/null; then break; fi
@@ -445,9 +451,11 @@ if (( UNINSTALL )); then
   fi
   run rm -f "$BIN/voxtype" "$BIN/voxtype-cleanup" "$BIN/voxtype-notify" "$BIN/llama-server-run" \
            "$OSD_BIN" "$BIN/.voxtype-osd-macos.tmp" \
-           "$LOOPBACK_BIN" "$BIN/.voxtype-loopback-macos.tmp" "$BIN/voxtype-meeting"
+           "$LOOPBACK_BIN" "$BIN/.voxtype-loopback-macos.tmp" "$BIN/voxtype-meeting" \
+           "$BIN/voxtype-power"
   run rm -rf "$SHIM_DIR"
-  run rm -f "$RAYCAST_DIR/voxtype-meeting.sh" "$RAYCAST_DIR/voxtype-meeting-status.sh"
+  run rm -f "$RAYCAST_DIR/voxtype-meeting.sh" "$RAYCAST_DIR/voxtype-meeting-status.sh" \
+           "$RAYCAST_DIR/voxtype-power.sh" "$RAYCAST_DIR/voxtype-power-status.sh"
   # The OSD is gone, but the notification keys it silenced are not restored
   # by anything above -- say so, or the setup ends up with no feedback.
   note "If the OSD had been installed, the recording notifications are OFF"
@@ -693,9 +701,11 @@ fi
 
 # ------------------------------------- phase 2: payload + config assertion --
 say "Phase 2: payload scripts + config assertion"
-for f in voxtype-cleanup voxtype-notify llama-server-run; do
+for f in voxtype-cleanup voxtype-notify llama-server-run voxtype-power; do
   run install -m 755 "$SRC/$f" "$BIN/$f"
 done
+runsh "install the voxtype-power Raycast script commands into $RAYCAST_DIR" \
+  "mkdir -p '$RAYCAST_DIR' && install -m 755 '$SRC/raycast/voxtype-power.sh' '$RAYCAST_DIR/voxtype-power.sh' && install -m 755 '$SRC/raycast/voxtype-power-status.sh' '$RAYCAST_DIR/voxtype-power-status.sh'"
 # vocabulary.conf is the one file a technical term is ever typed into, on any
 # machine. Both lists that need it are generated from it: whisper.initial_prompt
 # below, and the "Prefer these spellings" rule in voxtype-cleanup's system
@@ -1067,6 +1077,8 @@ if (( HAVE_MEETING )) && ! (( DRY_RUN )); then
     fi
   fi
 fi
+note "Off without uninstalling: voxtype-power off   (on | on --persist | status)"
+note ""
 note "Verify: codesign -d -r- $APP     # must name the cert, not a bare cdhash"
 note "        $BIN/voxtype setup app-bundle --status"
 note "        $BIN/voxtype setup check"

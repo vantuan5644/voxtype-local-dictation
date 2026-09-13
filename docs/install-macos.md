@@ -26,6 +26,7 @@ two Swift sources, and Homebrew.
 | `voxtype-cleanup` | `~/.local/bin/` | post-processor: four structural guards, few-shot prompt, `local`/`claude`/`codex`/`openai`/`off` backends |
 | `voxtype-notify` | `~/.local/bin/` | notification shim: terminal-notifier → osascript → silence |
 | `llama-server-run` | `~/.local/bin/` | preflight (model present, Metal present) + exec for llama-server |
+| `voxtype-power` | `~/.local/bin/` | `off` / `on` / `status` for the whole stack (Login Item + every LaunchAgent) without uninstalling |
 | `voxtype-meeting` | `~/.local/bin/` (`--with-meeting`) | meeting toggle wrapper + `export` + `summarize` (ordered backend chain, `codex,claude,local` by default; `local` only ever last) |
 | `../vocabulary.conf` | `~/.config/voxtype/` | the shared dictation vocabulary, the single place a term is typed |
 | `../voxtype-vocab` | `~/.local/bin/` | the vocabulary parser both consumers call |
@@ -34,7 +35,7 @@ two Swift sources, and Homebrew.
 | `loopback/voxtype-loopback-macos.swift` | compiled to `~/.local/bin/voxtype-loopback-macos` + symlinks in `~/.local/libexec/voxtype-shims/{pactl,parec}` | the meeting-mode pactl/parec shim (a CoreAudio process tap) |
 | `com.tuantran.llama-server.plist` | `~/Library/LaunchAgents/` | llama.cpp on Metal, port 8088 |
 | `com.tuantran.mlx-server.plist` | `~/Library/LaunchAgents/` | optional mlx-lm benchmark server, port 8089 |
-| `raycast/*.sh` | `~/raycast-scripts/` | Raycast script commands: meeting toggle + status row |
+| `raycast/*.sh` | `~/raycast-scripts/` | Raycast script commands: power toggle + status row; with `--with-meeting`, meeting toggle + status row |
 
 Everything shell-side runs under stock `/bin/bash` 3.2 (no Homebrew bash),
 and the plists carry `__HOME__` placeholders the installer expands, so nothing
@@ -177,6 +178,44 @@ install.
    hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q4_K_M.gguf \
       --local-dir ~/.local/share/models
    ```
+
+## Turning it off without uninstalling
+
+Idle, the stack is not free: measured here, the daemon holds ~580 MB with its
+model loaded and llama-server ~660 MB. `voxtype-power` stops and starts all of
+it without touching the install, the signature or the TCC grants:
+
+```sh
+voxtype-power status          # what runs, its memory, what starts at login
+voxtype-power off             # stop everything now and at login
+voxtype-power on              # start it for this login session only
+voxtype-power on --persist    # start it and restore start-at-login
+```
+
+Raycast gets **Voxtype Power**, a toggle that never passes `--persist`, and
+**Voxtype Status**, an inline row.
+
+- `off` refuses while `voxtype status` reports anything but idle, or while a
+  meeting is recording or paused, because stopping the daemon then loses the
+  words. `--force` overrides it.
+- The LaunchAgents are KeepAlive, so killing one only restarts it. `off` boots
+  each one out and `launchctl disable`s it. launchd will not bootstrap a
+  disabled job, but disabling a running job does not stop it, so `on` without
+  `--persist` is enable, bootstrap, then disable again. Re-running
+  `install.sh` clears the flag.
+- The Login Item is removed and re-added with the same System Events
+  AppleScript upstream uses. **Never restore it with `voxtype setup
+  app-bundle`**: that rebuilds the bundle ad-hoc signed, and the grants break
+  while System Settings still shows them ticked (see
+  [troubleshooting](troubleshooting.md#the-grant-that-stays-ticked-while-failing-macos)).
+- The first run from Raycast or a new terminal asks to let it control System
+  Events. If you deny it, `off` and `on --persist` stop before changing
+  anything.
+
+To free only the cleanup model, unload llama-server by itself:
+`launchctl bootout gui/$(id -u)/com.tuantran.llama-server`. Dictation keeps
+working, and `voxtype-cleanup` types the raw transcript after a ~1 ms refused
+health check.
 
 ## Verifying
 

@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+#
+# Turn the voxtype dictation stack off and back on without uninstalling it:
+# the Voxtype.app Login Item (menu-bar helper + daemon) and every LaunchAgent
+# install.sh put in ~/Library/LaunchAgents (llama-server, plus the OSD and the
+# MLX server where installed). See docs/install-macos.md ("Turning it off
+# without uninstalling").
+#
+#   voxtype-power status          what runs now, its memory, what starts at
+#                                 login (the default when no command is given)
+#   voxtype-power status --short  one word: on | off | partial
+#   voxtype-power off [--force]   stop everything now AND at login; refuses
+#                                 while a dictation or a meeting is in flight
+#   voxtype-power on              start everything now; what starts at login
+#                                 is left exactly as it was
+#   voxtype-power on --persist    start everything now AND at login
+#   --dry-run (with off or on)    print every action, take none
+#
+# Three facts this is built on, none of them obvious:
+#
+#   * The agents are KeepAlive (SuccessfulExit=false), so killing one only
+#     restarts it. `launchctl bootout` unloads it; `launchctl disable` is what
+#     keeps it from loading at the next login, and that flag persists.
+#   * launchd refuses to bootstrap a DISABLED job ("Bootstrap failed: 5:
+#     Input/output error"), yet disabling a job that is already running leaves
+#     it running. A start for this session only is therefore enable ->
+#     bootstrap -> disable again. Both halves measured on this Mac.
+#   * The Login Item is the System Events kind, added with the same AppleScript
+#     `voxtype setup app-bundle` runs. It is re-added here directly and NEVER by
+#     re-running `setup app-bundle`: that rebuilds the bundle ad-hoc signed,
+#     and every TCC grant breaks while System Settings still shows it ticked.
+#     The app starts through `env -i open`, as voxtype-meeting does, because
+#     an inherited PATH beats the bundle's LSEnvironment.
+#
+# The first Login Item query from a new host app (Raycast, another terminal)
+# raises an Automation prompt for System Events. Denying it makes `off` and
+# `on --persist` stop before they change anything.
+set -euo pipefail
+
+APP=/Applications/Voxtype.app
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+DOMAIN="gui/$(id -u)"
+# Everything install.sh can put in LaunchAgents. Only labels with a plist on
+# disk are touched, so an install without --with-osd/--with-mlx has fewer.
+LABELS=(com.tuantran.llama-server com.tuantran.voxtype-osd com.tuantran.mlx-server)
+# Raycast runs script commands with a minimal PATH that lacks ~/.local/bin.
+VOXTYPE="$HOME/.local/bin/voxtype"
+[[ -x $VOXTYPE ]] || VOXTYPE="$(command -v voxtype || true)"
+
+DRY_RUN=0 FORCE=0 PERSIST=0 SHORT=0 RC=0
+
+warn() { printf 'voxtype-power: %s\n' "$*" >&2; }
+fail() { warn "$@"; RC=1; }
+die()  { warn "$@"; exit 1; }
+# Every mutation goes through run (or system_events), so --dry-run is honest.
+run()  { if (( DRY_RUN )); then printf '[dry] %s\n' "$*"; else "$@"; fi; }
+
+# poll <tenths> <cmd...>: true as soon as cmd succeeds, false once the budget
+# runs out.
+poll() {
+  local n="$1" i=0; shift
+  until "$@"; do
+    (( i++ < n )) || return 1
+    sleep 0.1
+  done
+}
+
+app_running() { pgrep -x voxtype-bin >/dev/null 2>&1; }
+# shellcheck disable=SC2329 # called through poll
+app_stopped() { ! app_running; }
+loaded()      { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
+# shellcheck disable=SC2329 # called through poll
+unloaded()    { ! loaded "$1"; }
+
+# Both spellings of the override: "=> disabled" on current macOS, "=> true"
+# on older releases.
+disabled() {
+  launchctl print-disabled "$DOMAIN" 2>/dev/null |
+    awk -v l="\"$1\"" '$1 == l && ($3 == "disabled" || $3 == "true") { f = 1 } END { exit !f }'
+}
+
+installed_labels() {
+  local l
+  for l in "${LABELS[@]}"; do
+    if [[ -f $LAUNCH_AGENTS/$l.plist ]]; then echo "$l"; fi
+  done
+}
+
+agent_pid() {
+  { launchctl list "$1" 2>/dev/null || true; } |
+    awk -F' = ' '$1 ~ /"PID"$/ { gsub(/;/, "", $2); print $2 }'
+}
+
+# yes | no | unknown (System Events refused: the Automation prompt)
+login_item() {
+  local out
+  out="$(osascript -e 'tell application "System Events" to return exists login item "Voxtype"' 2>/dev/null)" ||
+    { echo unknown; return 0; }
+  case "$out" in true) echo yes ;; false) echo no ;; *) echo unknown ;; esac
+}
+
+system_events() { # system_events <one AppleScript statement>
+  if (( DRY_RUN )); then printf '[dry] System Events: %s\n' "$1"; return 0; fi
+  osascript -e 'tell application "System Events"' -e "$1" -e 'end tell' >/dev/null
+}
+
+# Summed physical footprint, not RSS: RSS leaves out llama-server's Metal
+# buffers and reads ~9 MB for a process holding ~660 MB.
+memory() { # memory <pid...>
+  { footprint -f bytes "$@" 2>/dev/null || true; } |
+    awk '/phys_footprint:/ { s += $2 } END { if (s) printf "%.0f MB\n", s / 1048576; else print "-" }'
+}
+
+mem_of() { # mem_of "<pid pid ...>"
+  if [[ -z ${1// /} ]]; then echo -; return 0; fi
+  # shellcheck disable=SC2086 # one argument per pid
+  memory $1
+}
+
+row() { printf '%-14s %-24s %8s  %s\n' "$@"; }
+
+# Why `off` must not run now, or nothing at all. Stopping the daemon mid-
+# dictation or mid-meeting loses the words, which is the one thing
+# voxtype-cleanup's own rule forbids. A status this does not recognise counts
+# as busy: --force is the way past it, not a silent guess.
+busy_reason() {
+  app_running || return 0
+  if [[ -z $VOXTYPE ]]; then
+    echo "the voxtype CLI is missing, so the dictation state is unknown"
+    return 0
+  fi
+  local s m
+  s="$("$VOXTYPE" status 2>/dev/null || true)"
+  case "$s" in
+    idle|stopped) ;;
+    *) echo "voxtype is ${s:-not answering}"; return 0 ;;
+  esac
+  # Same match as voxtype-meeting's state(): `meeting status` exits 0 either
+  # way, so the text is the only signal.
+  m="$("$VOXTYPE" meeting status 2>/dev/null || true)"
+  if grep -qiE 'paused|status:[[:space:]]*recording' <<<"$m"; then
+    echo "a meeting is in progress (voxtype-meeting stop saves it)"
+  fi
+}
+
+start_agent() {
+  local l="$1" plist="$LAUNCH_AGENTS/$1.plist" _
+  if loaded "$l"; then return 0; fi
+  if (( DRY_RUN )); then printf '[dry] launchctl bootstrap %s %s\n' "$DOMAIN" "$plist"; return 0; fi
+  for _ in 1 2 3; do
+    if launchctl bootstrap "$DOMAIN" "$plist" 2>/dev/null; then break; fi
+    sleep 0.5
+  done
+  loaded "$l" || fail "$l did not load: launchctl bootstrap $DOMAIN $plist"
+}
+
+cmd_status() {
+  local l pid pids now login all
+  if (( SHORT )); then
+    # Cheap on purpose (no footprint, no System Events): the Raycast status
+    # row runs it every refresh.
+    local up=0 total=1
+    if app_running; then up=1; fi
+    for l in $(installed_labels); do
+      total=$((total + 1))
+      if [[ -n $(agent_pid "$l") ]]; then up=$((up + 1)); fi
+    done
+    if (( up == total )); then echo on; elif (( up == 0 )); then echo off; else echo partial; fi
+    return 0
+  fi
+
+  row PIECE NOW MEMORY 'AT LOGIN'
+  pids="$(pgrep -x voxtype-bin | tr '\n' ' ' || true)"
+  pids="${pids% }"
+  if [[ -n $pids ]]; then now="running ($pids)"; else now=stopped; fi
+  row Voxtype.app "$now" "$(mem_of "$pids")" "$(login_item)"
+  all="$pids"
+  for l in $(installed_labels); do
+    pid="$(agent_pid "$l")"
+    if [[ -n $pid ]]; then
+      now="running ($pid)"; all="$all $pid"
+    elif loaded "$l"; then
+      now="loaded, not running"   # a KeepAlive job between restarts
+    else
+      now=stopped
+    fi
+    if disabled "$l"; then login=no; else login=yes; fi
+    row "${l#com.tuantran.}" "$now" "$(mem_of "$pid")" "$login"
+  done
+  row TOTAL "" "$(mem_of "$all")" ""
+}
+
+cmd_off() {
+  local why l
+  if (( ! FORCE )); then
+    why="$(busy_reason)"
+    [[ -z $why ]] || die "not turning off: $why. Let it finish, or pass --force."
+  fi
+
+  # First, and fatal: a refused Automation prompt stops here with nothing
+  # changed, instead of leaving the app off now but back at the next login.
+  if [[ $(login_item) != no ]]; then
+    system_events 'if exists login item "Voxtype" then delete login item "Voxtype"' ||
+      die "could not remove the Login Item. Allow this app to control System Events (System Settings > Privacy & Security > Automation), or remove Voxtype under General > Login Items."
+  fi
+
+  for l in $(installed_labels); do
+    if ! disabled "$l"; then run launchctl disable "$DOMAIN/$l"; fi
+    if loaded "$l"; then run launchctl bootout "$DOMAIN/$l" 2>/dev/null || true; fi
+  done
+  if app_running; then run pkill -x voxtype-bin || true; fi
+  if (( DRY_RUN )); then return 0; fi
+
+  # bootout and pkill both return before the process is gone. Wait, so an
+  # `on` straight after does not bootstrap into a job that is still leaving.
+  for l in $(installed_labels); do
+    poll 50 unloaded "$l" || fail "$l is still loaded: launchctl bootout $DOMAIN/$l"
+  done
+  poll 40 app_stopped || fail "voxtype-bin did not exit: pkill -9 -x voxtype-bin"
+  cmd_status
+}
+
+cmd_on() {
+  local l
+  if (( PERSIST )) && [[ $(login_item) != yes ]]; then
+    system_events "if not (exists login item \"Voxtype\") then make login item at end with properties {path:\"$APP\", hidden:true}" ||
+      die "could not add the Login Item. Allow this app to control System Events (System Settings > Privacy & Security > Automation)."
+  fi
+
+  for l in $(installed_labels); do
+    if disabled "$l"; then
+      run launchctl enable "$DOMAIN/$l"
+      start_agent "$l"
+      # Leaves the job running; only the next login skips it.
+      if (( ! PERSIST )); then run launchctl disable "$DOMAIN/$l"; fi
+    else
+      start_agent "$l"
+    fi
+  done
+
+  if ! app_running; then
+    run env -i /usr/bin/open -a "$APP" || fail "could not open $APP"
+    if (( ! DRY_RUN )); then
+      poll 50 app_running || fail "$APP did not start; open it by hand"
+    fi
+  fi
+  if (( ! DRY_RUN )); then cmd_status; fi
+}
+
+cmd="${1:-status}"
+if (( $# )); then shift; fi
+case "$cmd" in
+  -h|--help) sed -n '2,/^set /p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
+  status|off|on) ;;
+  *) die "unknown command: $cmd (status, off, on; --help for more)" ;;
+esac
+for arg in "$@"; do
+  case "$cmd:$arg" in
+    off:--dry-run|on:--dry-run) DRY_RUN=1 ;;
+    off:--force)                FORCE=1 ;;
+    on:--persist)               PERSIST=1 ;;
+    status:--short)             SHORT=1 ;;
+    *) die "unknown option for $cmd: $arg (--help for more)" ;;
+  esac
+done
+[[ -d $APP ]] || die "$APP is not installed; run macos/install.sh"
+
+case "$cmd" in
+  status) cmd_status ;;
+  off)    cmd_off ;;
+  on)     cmd_on ;;
+esac
+exit "$RC"
