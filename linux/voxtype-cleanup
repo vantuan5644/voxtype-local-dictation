@@ -17,7 +17,7 @@
 # local timeout to a 20s `claude -p` would re-import the latency this whole
 # change exists to remove. The fallback is always the raw text.
 #
-#   VOXTYPE_CLEANUP_BACKEND   local (default) | claude | codex | openai | off
+#   VOXTYPE_CLEANUP_BACKEND   local (default) | claude | codex | pi | openai | off
 #
 # Common tunables (defaults differ per backend -- see resolve_defaults):
 #   VOXTYPE_CLEANUP_MIN_WORDS   below this, pass through untouched
@@ -41,6 +41,7 @@
 #   VOXTYPE_CLEANUP_MODEL         cloud model name (claude: haiku)
 #   VOXTYPE_CLEANUP_API_KEY       bearer token for the openai backend
 #   VOXTYPE_CLEANUP_CODEX_PROFILE codex profile name (default: luna)
+#   VOXTYPE_CLEANUP_PI_MODEL      pi model (default: opencode-go/glm-5.3-flash)
 #
 # ON LATENCY -- this is why the local backend exists.
 #
@@ -112,6 +113,12 @@ resolve_defaults() {
     local)  MIN_WORDS="${VOXTYPE_CLEANUP_MIN_WORDS:-3}"
             TIMEOUT="${VOXTYPE_CLEANUP_TIMEOUT:-5}"
             MIN_SHRINK="${VOXTYPE_CLEANUP_MIN_SHRINK:-55}" ;;
+    # pi answers in ~1.1-1.6s (pi's own startup is ~0.25s of that), so it
+    # does not need the 6-word rationing the 5-30s CLIs do. The shrink floor
+    # stays at the cloud value: it is the same aggressive filler removal.
+    pi)     MIN_WORDS="${VOXTYPE_CLEANUP_MIN_WORDS:-3}"
+            TIMEOUT="${VOXTYPE_CLEANUP_TIMEOUT:-8}"
+            MIN_SHRINK="${VOXTYPE_CLEANUP_MIN_SHRINK:-45}" ;;
     *)      MIN_WORDS="${VOXTYPE_CLEANUP_MIN_WORDS:-6}"
             TIMEOUT="${VOXTYPE_CLEANUP_TIMEOUT:-20}"
             MIN_SHRINK="${VOXTYPE_CLEANUP_MIN_SHRINK:-45}" ;;
@@ -292,7 +299,7 @@ case "$BACKEND" in
       curl -sf --connect-timeout 0.3 --max-time 1 "$ENDPOINT/health" >/dev/null 2>&1 ||
         passthrough "$text"
     ;;
-  claude|codex)
+  claude|codex|pi)
     # The daemon's PATH is inherited from the graphical session and does
     # include the mise shims, so `claude` and `codex` resolve -- but that is a
     # property of how the user service happened to be started, not a guarantee.
@@ -377,6 +384,34 @@ call_backend() {
           --profile "${VOXTYPE_CLEANUP_CODEX_PROFILE:-luna}" \
           --sandbox read-only --ephemeral --skip-git-repo-check \
           "$INSTRUCTIONS"
+      ;;
+    pi)
+      # pi is the cheap way onto an OpenCode Go subscription. The endpoint
+      # refuses a bare HTTP call (it wants a coding agent's x-opencode-session
+      # header, and the plan's terms name pi as a supported client), so this
+      # goes through the CLI rather than the openai arm. Every discovery flag
+      # is off: no tools, extensions, skills, templates, themes, AGENTS.md or
+      # session file, and --offline skips the startup network checks. What is
+      # left measured 0.25s of startup.
+      #
+      # `pi -p` is one user message, so the worked examples cannot go in as
+      # real turns the way they do on the HTTP backends. They are appended to
+      # the system prompt as text instead.
+      #
+      # --thinking off is not optional: every opencode-go model is a
+      # reasoning model, and the default would spend seconds thinking about
+      # a comma.
+      local shots
+      shots="$(jq -r '. as $a | [range(0; length; 2) as $i |
+          "Input:\n\($a[$i].content)\nOutput:\n\($a[$i+1].content)"] |
+          join("\n\n")' <<<"$SHOTS_JSON")"
+      cd / && printf '<transcript>\n%s\n</transcript>' "$text" |
+        timeout "$TIMEOUT" pi -p --offline \
+          --model "${VOXTYPE_CLEANUP_PI_MODEL:-opencode-go/glm-5.3-flash}" \
+          --thinking off --no-tools --no-extensions --no-skills \
+          --no-prompt-templates --no-themes --no-context-files \
+          --no-session --no-approve \
+          --system-prompt "$INSTRUCTIONS"$'\n\nExamples:\n\n'"$shots"
       ;;
   esac
 }
