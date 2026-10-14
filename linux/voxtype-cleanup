@@ -11,13 +11,16 @@
 # tool that sometimes swallows a sentence is worse than one that never cleans
 # it up.
 #
-# BACKENDS. The default is local and offline: llama.cpp on 127.0.0.1:8088
-# holding Qwen3-4B-Instruct-2507 resident on the 4090. The cloud backends are
-# kept as an explicit choice, never as a fallback -- falling back from a 5s
-# local timeout to a 20s `claude -p` would re-import the latency this whole
-# change exists to remove. The fallback is always the raw text.
+# BACKENDS. The default (since 2026-10-14) is pi: `pi -p` with every discovery
+# flag off, answering on opencode-go/glm-5.3-flash in ~1.9s at the median. It
+# replaced the local llama.cpp backend (Qwen3-4B-Instruct-2507 resident on the
+# 4090, 127.0.0.1:8088), which is still here as `local` but no longer needs a
+# GPU-resident server running all day. The other backends are kept as an
+# explicit choice, never as a fallback -- chaining one timeout into another
+# backend would re-import the latency the default exists to avoid. The
+# fallback is always the raw text.
 #
-#   VOXTYPE_CLEANUP_BACKEND   local (default) | claude | codex | pi | openai | off
+#   VOXTYPE_CLEANUP_BACKEND   pi (default) | local | claude | codex | openai | off
 #
 # Common tunables (defaults differ per backend -- see resolve_defaults):
 #   VOXTYPE_CLEANUP_MIN_WORDS   below this, pass through untouched
@@ -79,7 +82,7 @@ NOTIFY="${BASH_SOURCE[0]%/*}/voxtype-notify"
 [[ -x $NOTIFY ]] || NOTIFY="$(command -v omarchy-notification-send 2>/dev/null || true)"
 [[ -x $NOTIFY ]] || NOTIFY=""
 
-BACKEND="${VOXTYPE_CLEANUP_BACKEND:-local}"
+BACKEND="${VOXTYPE_CLEANUP_BACKEND:-pi}"
 ENDPOINT="${VOXTYPE_CLEANUP_ENDPOINT:-http://127.0.0.1:8088}"
 LOCAL_MODEL="${VOXTYPE_CLEANUP_LOCAL_MODEL:-qwen3-4b-instruct-2507}"
 MAX_GROWTH="${VOXTYPE_CLEANUP_MAX_GROWTH:-3}"
