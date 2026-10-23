@@ -121,8 +121,8 @@ flowchart LR
 During setup, Windows can download version-locked binaries and models after the
 user selects the online option. On macOS and Linux the running dictation path
 stays local unless you opt into a hosted `VOXTYPE_CLEANUP_BACKEND`. The Windows
-setup window asks instead, and its default is Pi, a hosted model that receives
-the transcript text; choose Local Qwen only to keep cleanup on the PC. A failed
+setup window asks instead, and its default is Local Qwen only, which keeps
+cleanup on the PC; the Pi choices send the transcript text to a hosted model. A failed
 local cleanup returns the raw transcript instead of sending it elsewhere.
 Meeting summaries are the deliberate exception, and even they prefer the
 machine.

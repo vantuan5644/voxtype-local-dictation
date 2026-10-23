@@ -75,9 +75,9 @@ The setup window offers three choices:
 
 | Choice | Chain | Text leaves the PC | Download |
 |---|---|---|---|
-| Pi (hosted; sends transcript text), the default | `pi` | yes, to Pi's hosted model | 574 MB |
+| Local Qwen only, the default | `local` | no | 3.07 GB |
+| Pi (hosted; sends transcript text) | `pi` | yes, to Pi's hosted model | 574 MB |
 | Pi, then local Qwen if Pi is unavailable | `pi,local` | yes, unless Pi is unavailable | 3.07 GB |
-| Local Qwen only | `local` | no | 3.07 GB |
 
 The Pi choices need the `pi` CLI on `PATH`; until it is installed, that link is
 skipped. Setup records the choice for the current Windows account in
