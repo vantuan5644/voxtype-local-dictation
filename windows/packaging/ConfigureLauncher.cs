@@ -49,12 +49,12 @@ internal sealed class ConfigureForm : Form
     private List<ModelEntry> catalog;
 
     // The cleanup choices offered here, as chains for voxtype-setup.ps1 -CleanupBackend.
-    private static readonly string[] CleanupChains = { "pi", "pi,local", "local" };
+    private static readonly string[] CleanupChains = { "local", "pi", "pi,local" };
     private static readonly string[] CleanupLabels =
     {
+        "Local Qwen only (2.5 GB download; text stays on this PC)",
         "Pi (hosted; sends transcript text)",
-        "Pi, then local Qwen if Pi is unavailable",
-        "Local Qwen only (2.5 GB download; text stays on this PC)"
+        "Pi, then local Qwen if Pi is unavailable"
     };
 
     public ConfigureForm()
@@ -144,7 +144,8 @@ internal sealed class ConfigureForm : Form
 
         try { catalog = LoadModels(); }
         catch (Exception) { catalog = null; }
-        // A fresh install starts on Pi; a recorded choice that is offered here is kept.
+        // A fresh install starts on local cleanup, the same chain VoxType uses when no
+        // choice is recorded; a recorded choice that is offered here is kept.
         var recorded = Array.IndexOf(CleanupChains, CleanupBackend.ReadRecorded(dataDirectory));
         cleanup.SelectedIndex = recorded >= 0 ? recorded : 0;
         UpdateSummary();

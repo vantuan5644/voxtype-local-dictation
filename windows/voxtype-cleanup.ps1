@@ -34,6 +34,36 @@ function Get-EnvInt {
 
 function Write-Result {
     param([AllowEmptyString()][string]$Text)
+    # The app registers a local inbox. Storage failure must never stop insertion.
+    if (-not $ValidateCandidate -and $env:VOXTYPE_HISTORY_DISABLED -ne '1' -and
+        -not [string]::IsNullOrWhiteSpace($Text)) {
+        $temporary = $null
+        try {
+            $root = if ($env:VOXTYPE_DATA_ROOT) { $env:VOXTYPE_DATA_ROOT }
+                    else { Join-Path $env:LOCALAPPDATA 'VoxType' }
+            $registration = Join-Path $root 'dictation-history.json'
+            if (Test-Path -LiteralPath $registration -PathType Leaf) {
+                $history = [IO.File]::ReadAllText($registration) | ConvertFrom-Json
+                if ($history.schema -eq 1 -and [IO.Path]::IsPathRooted($history.inbox)) {
+                    [IO.Directory]::CreateDirectory($history.inbox) | Out-Null
+                    $id = [guid]::NewGuid().ToString('N')
+                    $event = @{schema = 1; id = $id; text = $Text; raw_text = $rawText
+                        created_at = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0}
+                    $temporary = Join-Path $history.inbox ($id + '.tmp')
+                    $final = Join-Path $history.inbox ($id + '.json')
+                    [IO.File]::WriteAllText($temporary, ($event | ConvertTo-Json -Compress),
+                        [Text.UTF8Encoding]::new($false))
+                    [IO.File]::Move($temporary, $final)
+                }
+            }
+        } catch {
+            [Console]::Error.WriteLine('Dictation history could not be saved.')
+        } finally {
+            if ($temporary -and [IO.File]::Exists($temporary)) {
+                try { [IO.File]::Delete($temporary) } catch {}
+            }
+        }
+    }
     [Console]::Out.Write($Text)
 }
 
