@@ -265,8 +265,8 @@ try {
     $runtimeFiles | Copy-Item -Destination (Join-Path $staging 'windows\bin')
     Copy-Item -LiteralPath (Join-Path $PayloadDirectory 'llama-server.exe') `
         -Destination (Join-Path $staging 'windows\bin\llama-server.exe')
-    foreach ($file in @('voxtype-local.ps1', 'voxtype-cleanup.ps1', 'voxtype-vocab.ps1',
-            'voxtype-server.ps1', 'voxtype-setup.ps1')) {
+    foreach ($file in @('voxtype-local.ps1', 'voxtype-cleanup.ps1', 'voxtype-cleanup-backend.ps1',
+            'voxtype-vocab.ps1', 'voxtype-server.ps1', 'voxtype-setup.ps1')) {
         Copy-Item -LiteralPath (Join-Path $windowsRoot $file) -Destination (Join-Path $staging 'windows')
     }
     Copy-Item -LiteralPath (Join-Path $voxtypeRoot 'vocabulary.conf') `
@@ -293,11 +293,14 @@ try {
         /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
         /reference:System.Web.Extensions.dll `
         "/out:$(Join-Path $staging 'voxtype-configure.exe')" `
-        (Join-Path $PSScriptRoot 'packaging\ConfigureLauncher.cs')
+        (Join-Path $PSScriptRoot 'packaging\ConfigureLauncher.cs') `
+        (Join-Path $PSScriptRoot 'packaging\ResumableDownload.cs') `
+        (Join-Path $PSScriptRoot 'packaging\CleanupBackend.cs')
     if ($LASTEXITCODE -ne 0) { throw 'failed to compile voxtype-configure.exe' }
     & $csc /nologo /target:winexe /platform:x64 /optimize+ `
         "/out:$(Join-Path $staging 'voxtype-startup.exe')" `
-        (Join-Path $PSScriptRoot 'packaging\StartupLauncher.cs')
+        (Join-Path $PSScriptRoot 'packaging\StartupLauncher.cs') `
+        (Join-Path $PSScriptRoot 'packaging\CleanupBackend.cs')
     if ($LASTEXITCODE -ne 0) { throw 'failed to compile voxtype-startup.exe' }
 
     Add-Type -AssemblyName System.Drawing

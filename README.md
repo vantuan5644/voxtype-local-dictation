@@ -119,10 +119,13 @@ flowchart LR
 ```
 
 During setup, Windows can download version-locked binaries and models after the
-user selects the online option. The running dictation path stays local unless
-you opt into a hosted `VOXTYPE_CLEANUP_BACKEND`. A failed local cleanup returns
-the raw transcript instead of sending it elsewhere. Meeting summaries are the
-deliberate exception, and even they prefer the machine.
+user selects the online option. On macOS and Linux the running dictation path
+stays local unless you opt into a hosted `VOXTYPE_CLEANUP_BACKEND`. The Windows
+setup window asks instead, and its default is Pi, a hosted model that receives
+the transcript text; choose Local Qwen only to keep cleanup on the PC. A failed
+local cleanup returns the raw transcript instead of sending it elsewhere.
+Meeting summaries are the deliberate exception, and even they prefer the
+machine.
 
 ## Platforms
 
@@ -130,7 +133,7 @@ deliberate exception, and even they prefer the machine.
 |---|---|---|---|
 | Push-to-talk key | `fn` (Globe) | Right Alt | chosen during setup |
 | Transcription | whisper on Metal | whisper on Vulkan/CUDA | upstream Windows build on Vulkan |
-| Cleanup model | llama.cpp LaunchAgent, port 8088 | llama.cpp systemd user unit, port 8088 | packaged llama.cpp startup app, port 8088 |
+| Cleanup model | llama.cpp LaunchAgent, port 8088 | llama.cpp systemd user unit, port 8088 | hosted through Pi, or packaged llama.cpp startup app on port 8088 (chosen during setup) |
 | Recording feedback | standalone OSD renderer (Swift) | the OSD voxtype spawns itself | native notifications in v1 |
 | Meeting mode | CoreAudio process tap | PipeWire monitor source | deferred |
 | Trigger extras | Raycast script commands | Hyprland bind + Omarchy menu row | MSIX execution aliases |
@@ -155,13 +158,16 @@ On Linux: `voxtype` itself, from
 not enough (see [install-linux](docs/install-linux.md#the-llamacpp-trap));
 `jq`; `curl`; and membership of the `input` group for the evdev hotkey.
 
-On Windows: Windows 11 x64 build 22621 or newer and about 4 GB of free storage.
-The signed installer carries the application binaries and the guided setup
-downloads or imports the models. The Windows v1 covers dictation and local
-cleanup; meeting capture and OSD remain follow-up work.
+On Windows: Windows 11 x64 build 22621 or newer, with about 0.6 GB of free
+storage for hosted cleanup through Pi or 3.1 GB with local Qwen. The signed
+installer carries the application binaries and the guided setup downloads or
+imports the models. The Windows v1 covers dictation and cleanup; meeting
+capture and OSD remain follow-up work.
 
-Every platform needs 4 to 6 GB of disk for the models. The Windows wizard can
-download them after explicit confirmation or import them from the offline bundle.
+Local cleanup needs 4 to 6 GB of disk for the models on every platform. The
+Windows wizard downloads them after explicit confirmation or imports them from
+the offline bundle, and skips the 2.5 GB cleanup model when cleanup runs
+through Pi.
 
 ## Quick start
 

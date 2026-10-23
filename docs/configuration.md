@@ -175,9 +175,16 @@ Use `voxtype-local vocab` in place of `voxtype-vocab`. Its `add`, `edit`,
 `list`, `path`, and `apply` commands preserve the same section rules; `apply`
 writes `[misheard]` directly with `voxtype config set whisper.initial_prompt`.
 
-The cleanup environment variables and defaults in this document are identical
-on Windows. The configured post-process command is `voxtype-local.exe cleanup`,
-and the local server still listens only on `http://127.0.0.1:8088`.
+The cleanup environment variables and defaults in this document apply on
+Windows, with two additions. `pi` is a sixth backend, and
+`VOXTYPE_CLEANUP_BACKEND` accepts an ordered chain such as `pi,local`: each
+link is tried in turn, and any failure falls through to the next and finally
+to the raw text. `local` may only be the last link. When the variable is unset,
+cleanup reads the chain the setup window recorded in
+`%LOCALAPPDATA%\VoxType\cleanup-backend`, and without that file it uses
+`local`. See [the Windows cleanup choice](install-windows.md#cleanup-choice).
+The configured post-process command is `voxtype-local.exe cleanup`, and the
+local server still listens only on `http://127.0.0.1:8088`.
 
 Per-project terms do not belong in this file at all; use
 `VOXTYPE_CLEANUP_CONTEXT`.

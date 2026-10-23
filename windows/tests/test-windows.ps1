@@ -13,7 +13,6 @@ $serverScript = Join-Path $windowsRoot 'voxtype-server.ps1'
 $builder = Join-Path $windowsRoot 'build-msix.ps1'
 $preparer = Join-Path $windowsRoot 'prepare-windows-release.ps1'
 $bootstrapBuilder = Join-Path $windowsRoot 'build-bootstrap.ps1'
-$bootstrapSource = Join-Path $windowsRoot 'packaging\BootstrapInstaller.cs'
 $offlineBuilder = Join-Path $windowsRoot 'build-offline-bundle.ps1'
 $dependencyLock = Join-Path $windowsRoot 'dependencies.lock.json'
 $releaseWorkflow = Join-Path $windowsRoot 'release-windows.yml'
@@ -23,6 +22,32 @@ if (-not (Test-Path -LiteralPath $releaseWorkflow -PathType Leaf)) {
 }
 $shell = (Get-Process -Id $PID).Path
 $failures = [System.Collections.Generic.List[string]]::new()
+$csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+# The cleanup script reads the recorded backend choice from the data root; keep this
+# machine's choice and environment out of every test below.
+$env:VOXTYPE_DATA_ROOT = Join-Path ([IO.Path]::GetTempPath()) `
+    ('voxtype-windows-data-' + [guid]::NewGuid().ToString('N'))
+Remove-Item Env:VOXTYPE_CLEANUP_BACKEND -ErrorAction SilentlyContinue
+
+# Runs a compiled test program and records its output as a failure unless it exits 0.
+function Invoke-TestProgram {
+    param([string]$Path, [string]$Name, [int]$TimeoutSeconds = 120)
+    $start = [Diagnostics.ProcessStartInfo]::new($Path)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    $outTask = $process.StandardOutput.ReadToEndAsync()
+    $errTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        try { $process.Kill() } catch { }
+        $failures.Add("$Name did not finish within $TimeoutSeconds seconds")
+        return
+    }
+    $output = $outTask.GetAwaiter().GetResult() + $errTask.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) { $failures.Add("$Name exited $($process.ExitCode):`n$output") }
+}
 
 function Quote-Argument {
     param([string]$Value)
@@ -94,6 +119,11 @@ try {
         if ($model.url -notmatch '^https://' -or $model.sha256 -notmatch '^[0-9a-f]{64}$') {
             $failures.Add("dependency model is not pinned: $($model.id)")
         }
+        # The size lets setup verify an already complete .partial without a request.
+        $size = $model.PSObject.Properties['size']
+        if ($null -eq $size -or [string]$size.Value -notmatch '^[1-9][0-9]*$') {
+            $failures.Add("dependency model has no positive byte size: $($model.id)")
+        }
     }
 } catch { $failures.Add("dependency lock failed to parse: $($_.Exception.Message)") }
 try {
@@ -109,13 +139,66 @@ try {
         $failures.Add('release workflow does not trust the self-signed certificate during verification')
     }
 } catch { $failures.Add("release workflow failed to parse: $($_.Exception.Message)") }
-try {
-    $bootstrapSourceText = Get-Content -LiteralPath $bootstrapSource -Raw
-    if ($bootstrapSourceText -notmatch
-            'ServicePointManager\.SecurityProtocol\s*\|=\s*SecurityProtocolType\.Tls12') {
-        $failures.Add('bootstrap downloader does not explicitly enable TLS 1.2')
+# The launchers are built by the .NET Framework csc without a TargetFrameworkAttribute,
+# so they run with .NET 4.0 TLS defaults (SSL 3.0 and TLS 1.0 only). GitHub, Hugging Face
+# and its CDN refuse those, and SystemDefault throws in that mode, so every source that
+# makes an HTTP request must add TLS 1.2 explicitly. All downloads go through
+# ResumableDownload.cs, which both build scripts compile next to their launcher.
+$downloaders = [System.Collections.Generic.List[string]]::new()
+foreach ($launcherSource in Get-ChildItem -LiteralPath (Join-Path $windowsRoot 'packaging') `
+        -Filter '*.cs' -File) {
+    try {
+        $launcherText = Get-Content -LiteralPath $launcherSource.FullName -Raw
+    } catch {
+        $failures.Add("$($launcherSource.Name) failed to read: $($_.Exception.Message)")
+        continue
     }
-} catch { $failures.Add("bootstrap source failed to parse: $($_.Exception.Message)") }
+    if ($launcherText -notmatch 'WebRequest|WebClient|HttpClient') { continue }
+    $downloaders.Add($launcherSource.Name)
+    if ($launcherText -notmatch
+            'ServicePointManager\.SecurityProtocol\s*\|=\s*SecurityProtocolType\.Tls12') {
+        $failures.Add("$($launcherSource.Name) downloads without explicitly enabling TLS 1.2")
+    }
+    if ($launcherText -match 'SecurityProtocolType\.SystemDefault') {
+        $failures.Add("$($launcherSource.Name) uses SystemDefault, which csc-built launchers reject")
+    }
+}
+if (-not $downloaders.Contains('ResumableDownload.cs')) {
+    $failures.Add('TLS check no longer recognizes ResumableDownload.cs as a downloader')
+}
+foreach ($launcherName in @('BootstrapInstaller.cs', 'ConfigureLauncher.cs')) {
+    $launcherText = Get-Content -LiteralPath (Join-Path $windowsRoot "packaging\$launcherName") -Raw
+    if ($launcherText -notmatch 'new ResumableDownload') {
+        $failures.Add("$launcherName no longer downloads through ResumableDownload")
+    }
+}
+# Shared sources must be compiled, and shared scripts packaged, by the real build scripts.
+$msixBuilderText = Get-Content -LiteralPath $builder -Raw
+$bootstrapBuilderText = Get-Content -LiteralPath $bootstrapBuilder -Raw
+foreach ($requirement in @(
+        @($msixBuilderText, 'packaging\ResumableDownload.cs', 'build-msix.ps1'),
+        @($msixBuilderText, 'packaging\CleanupBackend.cs', 'build-msix.ps1'),
+        @($msixBuilderText, "'voxtype-cleanup-backend.ps1'", 'build-msix.ps1'),
+        @($bootstrapBuilderText, 'packaging\ResumableDownload.cs', 'build-bootstrap.ps1'))) {
+    if (-not $requirement[0].Contains($requirement[1])) {
+        $failures.Add("$($requirement[2]) does not include $($requirement[1])")
+    }
+}
+
+# Cleanup backend chain rules, shared by voxtype-setup.ps1 and voxtype-cleanup.ps1.
+. (Join-Path $windowsRoot 'voxtype-cleanup-backend.ps1')
+foreach ($case in @(@('pi', 'pi'), @(' Pi , LOCAL ', 'pi,local'), @('off', 'off'),
+        @('local', 'local'), @('claude,codex,openai,local', 'claude,codex,openai,local'))) {
+    try {
+        Assert-Equal "cleanup chain <$($case[0])>" $case[1] `
+            (ConvertTo-CleanupBackendChain $case[0])
+    } catch { $failures.Add("cleanup chain <$($case[0])> was rejected: $($_.Exception.Message)") }
+}
+foreach ($invalid in @('', '  ', 'local,pi', 'off,pi', 'pi,off', 'pi,,local', 'pi,pi', 'bogus')) {
+    $accepted = $true
+    try { ConvertTo-CleanupBackendChain $invalid | Out-Null } catch { $accepted = $false }
+    if ($accepted) { $failures.Add("cleanup chain <$invalid> was accepted") }
+}
 
 function Start-FakeCleanupServer {
     param([string]$ResponseText)
@@ -233,6 +316,81 @@ try {
     Remove-Item Env:VOXTYPE_CLEANUP_ENDPOINT -ErrorAction SilentlyContinue
 }
 
+# A recorded chain is tried link by link: a stubbed pi CLI first, then the fake local
+# server. Every failure, including an answer a guard rejects, falls through, and the
+# last resort is the raw text.
+$chainRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    ('voxtype-chain-test-' + [guid]::NewGuid().ToString('N'))
+$oldPath = $env:PATH
+$oldChainDataRoot = $env:VOXTYPE_DATA_ROOT
+$oldChainLog = $env:VOXTYPE_TEST_LOG
+try {
+    $stubBin = Join-Path $chainRoot 'bin'
+    New-Item -ItemType Directory -Path $stubBin -Force | Out-Null
+    $piLog = Join-Path $chainRoot 'pi-calls.log'
+    $piStub = @'
+@echo off
+>>"%VOXTYPE_TEST_LOG%" echo pi
+if "%PI_STUB_MODE%"=="fail" exit /b 1
+if "%PI_STUB_MODE%"=="invent" goto invent
+echo So, can you check the Tailscale status on the mini PC?
+exit /b 0
+:invent
+echo So can you check the Tailscale status on the mini PC and reboot the router tonight?
+exit /b 0
+'@
+    [IO.File]::WriteAllText((Join-Path $stubBin 'pi.cmd'), ($piStub -replace "`r?`n", "`r`n"),
+        [Text.Encoding]::ASCII)
+    $env:PATH = "$stubBin;$oldPath"
+    $env:VOXTYPE_DATA_ROOT = $chainRoot
+    $env:VOXTYPE_TEST_LOG = $piLog
+    $piAnswer = 'So, can you check the Tailscale status on the mini PC?'
+    $localAnswer = 'So can you check the Tailscale status on the mini PC?'
+
+    function Test-CleanupChain {
+        param([string]$Name, [string]$Recorded, [string]$PiMode, [string]$LocalAnswer,
+            [string]$Expected, [int]$ExpectedPiCalls, [string]$BackendVariable)
+        [IO.File]::WriteAllText((Join-Path $chainRoot 'cleanup-backend'), $Recorded,
+            [Text.UTF8Encoding]::new($false))
+        Remove-Item -LiteralPath $piLog -ErrorAction SilentlyContinue
+        $env:PI_STUB_MODE = $PiMode
+        if ($BackendVariable) { $env:VOXTYPE_CLEANUP_BACKEND = $BackendVariable }
+        else { Remove-Item Env:VOXTYPE_CLEANUP_BACKEND -ErrorAction SilentlyContinue }
+        $fake = $null
+        if ($LocalAnswer) {
+            $fake = Start-FakeCleanupServer $LocalAnswer
+            $env:VOXTYPE_CLEANUP_ENDPOINT = "http://127.0.0.1:$($fake.Port)"
+        } else { $env:VOXTYPE_CLEANUP_ENDPOINT = 'http://127.0.0.1:1' }
+        try {
+            Assert-Equal "cleanup chain: $Name" $Expected (Invoke-Cleanup $raw '' -CallBackend)
+            $piCalls = if (Test-Path -LiteralPath $piLog) { @(Get-Content -LiteralPath $piLog).Count } else { 0 }
+            if ($piCalls -ne $ExpectedPiCalls) {
+                $failures.Add("cleanup chain: $Name called pi $piCalls time(s), expected $ExpectedPiCalls")
+            }
+        } finally {
+            if ($null -ne $fake) {
+                Stop-Job $fake.Job -ErrorAction SilentlyContinue
+                Remove-Job $fake.Job -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    Test-CleanupChain 'pi fails, local answers' 'pi,local' 'fail' $localAnswer $localAnswer 1
+    Test-CleanupChain 'pi answers first' 'pi,local' 'ok' '' $piAnswer 1
+    Test-CleanupChain 'rejected pi answer falls through' 'pi,local' 'invent' $localAnswer $localAnswer 1
+    Test-CleanupChain 'every link fails' 'pi,local' 'fail' '' $raw 1
+    Test-CleanupChain 'pi alone fails' 'pi' 'fail' '' $raw 1
+    Test-CleanupChain 'environment wins over the file' 'local' 'ok' '' $piAnswer 1 'pi'
+    Test-CleanupChain 'invalid file keeps the text here' 'local,pi' 'ok' '' $raw 0
+    Test-CleanupChain 'off' 'off' 'ok' '' $raw 0
+} finally {
+    $env:PATH = $oldPath
+    $env:VOXTYPE_DATA_ROOT = $oldChainDataRoot
+    $env:VOXTYPE_TEST_LOG = $oldChainLog
+    Remove-Item Env:PI_STUB_MODE, Env:VOXTYPE_CLEANUP_ENDPOINT, Env:VOXTYPE_CLEANUP_BACKEND `
+        -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $chainRoot) { Remove-Item -LiteralPath $chainRoot -Recurse -Force }
+}
+
 $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-windows-test-' + [guid]::NewGuid().ToString('N'))
 $oldVocab = $env:VOXTYPE_VOCAB_FILE
 $oldExecutable = $env:VOXTYPE_EXE
@@ -328,6 +486,49 @@ exit /b 0
         }
     }
 
+    # -CleanupBackend: validated before anything changes, recorded only when given, and
+    # the missing-Qwen warning only for a chain that can use the local model.
+    $backendFile = Join-Path $testDataRoot 'cleanup-backend'
+    function Invoke-BackendSetup {
+        param([string[]]$Arguments)
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $text = & $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+                -File $setup -WhisperModelPath $fakeWhisper @Arguments 2>&1 | Out-String
+            return [pscustomobject]@{ Exit = $LASTEXITCODE; Text = $text }
+        } finally { $ErrorActionPreference = $savedPreference }
+    }
+    function Get-RecordedBackend {
+        if (-not (Test-Path -LiteralPath $backendFile -PathType Leaf)) { return '<absent>' }
+        return [IO.File]::ReadAllText($backendFile)
+    }
+    $run = Invoke-BackendSetup @('-CleanupBackend', 'Pi')
+    if ($run.Exit -ne 0) { $failures.Add("setup -CleanupBackend Pi exited $($run.Exit)`n$($run.Text)") }
+    Assert-Equal 'setup records the cleanup backend' 'pi' (Get-RecordedBackend)
+    if ($run.Text -match 'Cleanup model is missing') {
+        $failures.Add('setup warned about the Qwen model for a chain without local')
+    }
+    $run = Invoke-BackendSetup @('-CleanupBackend', 'pi,local', '-DryRun')
+    if ($run.Exit -ne 0 -or
+        -not $run.Text.Contains("[dry] record cleanup backend pi,local at $backendFile")) {
+        $failures.Add("setup -DryRun did not report the cleanup backend`n$($run.Text)")
+    }
+    if ($run.Text -notmatch 'Cleanup model is missing') {
+        $failures.Add('setup did not warn about the missing Qwen model for a chain with local')
+    }
+    Assert-Equal 'setup -DryRun leaves the recorded backend' 'pi' (Get-RecordedBackend)
+    foreach ($invalid in @('local,pi', 'off,pi', 'pi,bogus')) {
+        $run = Invoke-BackendSetup @('-CleanupBackend', $invalid)
+        if ($run.Exit -eq 0) { $failures.Add("setup accepted -CleanupBackend $invalid") }
+        Assert-Equal "setup keeps the backend after rejecting $invalid" 'pi' (Get-RecordedBackend)
+    }
+    $run = Invoke-BackendSetup @()
+    if ($run.Exit -ne 0 -or $run.Text -notmatch 'cleanup: pi') {
+        $failures.Add("setup without -CleanupBackend did not keep the recorded choice`n$($run.Text)")
+    }
+    Assert-Equal 'setup without -CleanupBackend leaves the file' 'pi' (Get-RecordedBackend)
+
     $fakeMsix = Join-Path $tempDir 'VoxType-test.msix'
     [IO.File]::WriteAllText($fakeMsix, 'test package', [Text.Encoding]::ASCII)
     $bootstrapOutput = Join-Path $tempDir 'release'
@@ -379,17 +580,32 @@ exit /b 0
             }
         } finally { $zip.Dispose() }
     }
-    $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    $packaging = Join-Path $windowsRoot 'packaging'
     & $csc /nologo /target:winexe /platform:x64 /optimize+ `
         /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
         /reference:System.Web.Extensions.dll `
         "/out:$(Join-Path $tempDir 'voxtype-configure.exe')" `
-        (Join-Path $windowsRoot 'packaging\ConfigureLauncher.cs')
+        (Join-Path $packaging 'ConfigureLauncher.cs') `
+        (Join-Path $packaging 'ResumableDownload.cs') `
+        (Join-Path $packaging 'CleanupBackend.cs')
     if ($LASTEXITCODE -ne 0) { $failures.Add('guided setup failed to compile') }
     & $csc /nologo /target:winexe /platform:x64 /optimize+ `
         "/out:$(Join-Path $tempDir 'voxtype-startup.exe')" `
-        (Join-Path $windowsRoot 'packaging\StartupLauncher.cs')
+        (Join-Path $packaging 'StartupLauncher.cs') (Join-Path $packaging 'CleanupBackend.cs')
     if ($LASTEXITCODE -ne 0) { $failures.Add('startup launcher failed to compile') }
+
+    # The shared downloader against a scripted loopback server: resume, a partial that is
+    # already complete (by pinned size or 416), stalls, early closes, digest failures.
+    $downloadTests = Join-Path $tempDir 'download-tests.exe'
+    & $csc /nologo /target:exe /platform:x64 /optimize+ "/out:$downloadTests" `
+        (Join-Path $PSScriptRoot 'DownloadTests.cs') (Join-Path $packaging 'ResumableDownload.cs')
+    if ($LASTEXITCODE -ne 0) { $failures.Add('download tests failed to compile') }
+    else { Invoke-TestProgram $downloadTests 'download tests' }
+    $backendTests = Join-Path $tempDir 'cleanup-backend-tests.exe'
+    & $csc /nologo /target:exe /platform:x64 /optimize+ "/out:$backendTests" `
+        (Join-Path $PSScriptRoot 'CleanupBackendTests.cs') (Join-Path $packaging 'CleanupBackend.cs')
+    if ($LASTEXITCODE -ne 0) { $failures.Add('cleanup backend tests failed to compile') }
+    else { Invoke-TestProgram $backendTests 'cleanup backend tests' }
 
     $fakeServer = Join-Path $tempDir 'fake-llama-server.cmd'
     $serverCallLog = Join-Path $tempDir 'llama-server-calls.log'

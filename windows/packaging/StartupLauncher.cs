@@ -11,7 +11,9 @@ internal static class StartupLauncher
         if (!File.Exists(Path.Combine(data, "startup.enabled"))) return 0;
         var root = AppDomain.CurrentDomain.BaseDirectory;
         Start(Path.Combine(root, "voxtype.exe"));
-        Start(Path.Combine(root, "voxtype-cleanup-server.exe"));
+        // A GPU-resident Qwen is started only for a cleanup chain that uses it.
+        if (CleanupBackend.WantsLocalServer(data))
+            Start(Path.Combine(root, "voxtype-cleanup-server.exe"));
         return 0;
     }
 

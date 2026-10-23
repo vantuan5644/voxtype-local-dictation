@@ -189,7 +189,8 @@ function Invoke-HttpBackend {
     return [string]$response.choices[0].message.content
 }
 
-function Test-Candidate {
+# The cleaned text when it passes every guard, or $null when it must be rejected.
+function Get-AcceptedCandidate {
     param(
         [string]$Raw,
         [AllowEmptyString()][string]$Cleaned,
@@ -205,9 +206,9 @@ function Test-Candidate {
         -not $Raw.StartsWith('"')) {
         $value = $value.Substring(1, $value.Length - 2)
     }
-    if ([string]::IsNullOrEmpty($value)) { return $Raw }
-    if ($value.Length -gt ($Raw.Length * $MaxGrowth)) { return $Raw }
-    if (($value.Length * 100) -lt ($Raw.Length * $MinShrink)) { return $Raw }
+    if ([string]::IsNullOrEmpty($value)) { return $null }
+    if ($value.Length -gt ($Raw.Length * $MaxGrowth)) { return $null }
+    if (($value.Length * 100) -lt ($Raw.Length * $MinShrink)) { return $null }
 
     $ignored = @{}
     foreach ($word in @('know', 'like', 'mean', 'sort', 'kind', 'basically', 'actually',
@@ -220,30 +221,62 @@ function Test-Candidate {
     if (@($content).Count -ge 3) {
         $kept = @($content | Where-Object { $outputLower.Contains($_) }).Count
         $score = [math]::Floor($kept * 100 / @($content).Count)
-        if ($score -lt $KeepWords) { return $Raw }
+        if ($score -lt $KeepWords) { return $null }
     }
-    if ((Get-WordCount $value) -gt ((Get-WordCount $Raw) + $MaxNewWords)) { return $Raw }
+    if ((Get-WordCount $value) -gt ((Get-WordCount $Raw) + $MaxNewWords)) { return $null }
     return $value
+}
+
+function Test-Candidate {
+    param(
+        [string]$Raw,
+        [AllowEmptyString()][string]$Cleaned,
+        [int]$MaxGrowth,
+        [int]$MinShrink,
+        [int]$KeepWords,
+        [int]$MaxNewWords
+    )
+    $accepted = Get-AcceptedCandidate @PSBoundParameters
+    if ($null -eq $accepted) { return $Raw }
+    return $accepted
+}
+
+# Per-link guards. The local server answers in about a second, so it takes shorter
+# utterances, a shorter timeout and a stricter shrink limit than the hosted links.
+function Get-LinkSettings {
+    param([string]$Backend)
+    $isLocal = $Backend -eq 'local'
+    return @{
+        MinWords = Get-EnvInt VOXTYPE_CLEANUP_MIN_WORDS $(if ($isLocal) { 3 } else { 6 })
+        Timeout = Get-EnvInt VOXTYPE_CLEANUP_TIMEOUT $(if ($isLocal) { 5 } else { 20 })
+        MinShrink = Get-EnvInt VOXTYPE_CLEANUP_MIN_SHRINK $(if ($isLocal) { 55 } else { 45 })
+    }
 }
 
 $rawText = [Console]::In.ReadToEnd()
 if ([string]::IsNullOrWhiteSpace($rawText)) { Write-Result $rawText; exit 0 }
 
-$backend = (Get-EnvValue VOXTYPE_CLEANUP_BACKEND 'local').ToLowerInvariant()
+. (Join-Path $PSScriptRoot 'voxtype-cleanup-backend.ps1')
+try {
+    $chain = @((ConvertTo-CleanupBackendChain `
+        (Get-CleanupBackendSetting (Get-CleanupDataRoot))).Split(','))
+} catch {
+    # An unreadable or invalid choice cannot say where the text may go: keep it here.
+    [Console]::Error.WriteLine("voxtype-cleanup: $($_.Exception.Message)")
+    Write-Result $rawText
+    exit 0
+}
 $maxGrowth = Get-EnvInt VOXTYPE_CLEANUP_MAX_GROWTH 3
 $keepWords = Get-EnvInt VOXTYPE_CLEANUP_KEEP_WORDS 70
 $maxNewWords = Get-EnvInt VOXTYPE_CLEANUP_MAX_NEW_WORDS 0
-$localBackend = $backend -eq 'local'
-$minWords = Get-EnvInt VOXTYPE_CLEANUP_MIN_WORDS $(if ($localBackend) { 3 } else { 6 })
-$timeoutSeconds = Get-EnvInt VOXTYPE_CLEANUP_TIMEOUT $(if ($localBackend) { 5 } else { 20 })
-$minShrink = Get-EnvInt VOXTYPE_CLEANUP_MIN_SHRINK $(if ($localBackend) { 55 } else { 45 })
 
 if ($ValidateCandidate) {
+    $first = Get-LinkSettings $chain[0]
     Write-Result (Test-Candidate -Raw $rawText -Cleaned $Candidate -MaxGrowth $maxGrowth `
-        -MinShrink $minShrink -KeepWords $keepWords -MaxNewWords $maxNewWords)
+        -MinShrink $first.MinShrink -KeepWords $keepWords -MaxNewWords $maxNewWords)
     exit 0
 }
-if ($backend -eq 'off' -or (Get-WordCount $rawText) -lt $minWords) {
+if ($chain[0] -eq 'off') {
     Write-Result $rawText
     exit 0
 }
@@ -277,53 +310,86 @@ Rules:
 $vocabulary = Get-Vocabulary
 if ($vocabulary.Length -gt 0) { $instructions += "`n- Prefer these spellings: $vocabulary." }
 $context = Get-EnvValue VOXTYPE_CLEANUP_CONTEXT ''
-if ($context.Length -gt 0 -and $backend -ne 'local' -and
-    (Get-EnvValue VOXTYPE_CONTEXT_LOCAL_ONLY '1') -eq '1') { $context = '' }
-if ($context.Length -gt 0) {
-    $instructions += "`n`nAdditional context for this machine:`n$context"
-}
+$contextLocalOnly = (Get-EnvValue VOXTYPE_CONTEXT_LOCAL_ONLY '1') -eq '1'
 
-try {
-    $wordCount = Get-WordCount $rawText
-    $maxTokens = $wordCount * 2 + 24
-    switch ($backend) {
+# One link's answer as text. Throws when the backend is unavailable, fails or times out.
+function Invoke-CleanupBackend {
+    param(
+        [string]$Backend,
+        [string]$Text,
+        [string]$Instructions,
+        [int]$TimeoutSeconds,
+        [int]$MaxTokens
+    )
+    switch ($Backend) {
         'local' {
             $endpoint = Get-EnvValue VOXTYPE_CLEANUP_ENDPOINT 'http://127.0.0.1:8088'
             Invoke-WebRequest -UseBasicParsing -Uri ($endpoint.TrimEnd('/') + '/health') `
                 -TimeoutSec 1 | Out-Null
             $cleaned = Invoke-HttpBackend -Endpoint $endpoint `
                 -Model (Get-EnvValue VOXTYPE_CLEANUP_LOCAL_MODEL 'qwen3-4b-instruct-2507') `
-                -SystemPrompt $instructions -Text $rawText -MaxTokens $maxTokens `
-                -TimeoutSeconds $timeoutSeconds -CachePrompt $true -ApiKey ''
+                -SystemPrompt $Instructions -Text $Text -MaxTokens $MaxTokens `
+                -TimeoutSeconds $TimeoutSeconds -CachePrompt $true -ApiKey ''
         }
         'openai' {
             $cleaned = Invoke-HttpBackend `
                 -Endpoint (Get-EnvValue VOXTYPE_CLEANUP_ENDPOINT 'http://127.0.0.1:8088') `
                 -Model (Get-EnvValue VOXTYPE_CLEANUP_MODEL 'gpt-4o-mini') `
-                -SystemPrompt $instructions -Text $rawText -MaxTokens $maxTokens `
-                -TimeoutSeconds $timeoutSeconds -CachePrompt $false `
+                -SystemPrompt $Instructions -Text $Text -MaxTokens $MaxTokens `
+                -TimeoutSeconds $TimeoutSeconds -CachePrompt $false `
                 -ApiKey (Get-EnvValue VOXTYPE_CLEANUP_API_KEY '')
         }
+        'pi' {
+            $cleaned = Invoke-CliBackend -FileName 'pi' -TimeoutSeconds $TimeoutSeconds `
+                -StandardInput "<transcript>`n$Text`n</transcript>" -Arguments @(
+                    '-p', '--offline', '--model',
+                    (Get-EnvValue VOXTYPE_CLEANUP_PI_MODEL 'opencode-go/glm-5.3-flash'),
+                    '--thinking', 'off', '--no-tools', '--no-extensions', '--no-skills',
+                    '--no-prompt-templates', '--no-themes', '--no-context-files',
+                    '--no-session', '--no-approve', '--system-prompt', $Instructions)
+        }
         'claude' {
-            $cleaned = Invoke-CliBackend -FileName 'claude' -TimeoutSeconds $timeoutSeconds `
-                -StandardInput "<transcript>`n$rawText`n</transcript>" -Arguments @(
+            $cleaned = Invoke-CliBackend -FileName 'claude' -TimeoutSeconds $TimeoutSeconds `
+                -StandardInput "<transcript>`n$Text`n</transcript>" -Arguments @(
                     '-p', '--model', (Get-EnvValue VOXTYPE_CLEANUP_MODEL 'haiku'),
                     '--strict-mcp-config', '--tools', '', '--safe-mode',
-                    '--system-prompt', $instructions)
+                    '--system-prompt', $Instructions)
         }
         'codex' {
-            $cleaned = Invoke-CliBackend -FileName 'codex' -TimeoutSeconds $timeoutSeconds `
-                -StandardInput "<transcript>`n$rawText`n</transcript>" -Arguments @(
+            $cleaned = Invoke-CliBackend -FileName 'codex' -TimeoutSeconds $TimeoutSeconds `
+                -StandardInput "<transcript>`n$Text`n</transcript>" -Arguments @(
                     '--ask-for-approval', 'never', 'exec', '--profile',
                     (Get-EnvValue VOXTYPE_CLEANUP_CODEX_PROFILE 'luna'), '--sandbox',
-                    'read-only', '--ephemeral', '--skip-git-repo-check', $instructions)
+                    'read-only', '--ephemeral', '--skip-git-repo-check', $Instructions)
         }
-        default { throw "unknown backend: $backend" }
+        default { throw "unknown backend: $Backend" }
     }
-    $chosen = Test-Candidate -Raw $rawText -Cleaned ([string]$cleaned) `
-        -MaxGrowth $maxGrowth -MinShrink $minShrink -KeepWords $keepWords `
-        -MaxNewWords $maxNewWords
-    Write-Result $chosen
-} catch {
-    Write-Result $rawText
+    return [string]$cleaned
 }
+
+# Each link in order. A link that is unavailable, times out, fails, or returns text
+# that breaks a guard falls through to the next; the last resort is the raw text.
+$wordCount = Get-WordCount $rawText
+$maxTokens = $wordCount * 2 + 24
+foreach ($link in $chain) {
+    $settings = Get-LinkSettings $link
+    if ($wordCount -lt $settings.MinWords) { continue }
+    $linkInstructions = $instructions
+    if ($context.Length -gt 0 -and ($link -eq 'local' -or -not $contextLocalOnly)) {
+        $linkInstructions += "`n`nAdditional context for this machine:`n$context"
+    }
+    try {
+        $cleaned = Invoke-CleanupBackend -Backend $link -Text $rawText `
+            -Instructions $linkInstructions -TimeoutSeconds $settings.Timeout -MaxTokens $maxTokens
+        $accepted = Get-AcceptedCandidate -Raw $rawText -Cleaned $cleaned `
+            -MaxGrowth $maxGrowth -MinShrink $settings.MinShrink -KeepWords $keepWords `
+            -MaxNewWords $maxNewWords
+    } catch {
+        $accepted = $null
+    }
+    if ($null -ne $accepted) {
+        Write-Result $accepted
+        exit 0
+    }
+}
+Write-Result $rawText

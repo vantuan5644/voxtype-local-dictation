@@ -48,6 +48,11 @@ switch ($Command.ToLowerInvariant()) {
                     if ($index -ge $Remaining.Count) { throw '-AudioDevice needs a value' }
                     $setupParameters.AudioDevice = $Remaining[$index]
                 }
+                '-CleanupBackend' {
+                    $index++
+                    if ($index -ge $Remaining.Count) { throw '-CleanupBackend needs a value' }
+                    $setupParameters.CleanupBackend = $Remaining[$index]
+                }
                 '-EnableStartup' { $setupParameters.EnableStartup = $true }
                 '-DisableStartup' { $setupParameters.DisableStartup = $true }
                 '-SetupVad' { $setupParameters.SetupVad = $true }
@@ -62,7 +67,10 @@ switch ($Command.ToLowerInvariant()) {
 Usage: voxtype-local <command>
 
   setup [-Hotkey KEY] [-WhisperModelPath PATH] [-CleanupModelPath PATH]
-        [-AudioDevice NAME] [-EnableStartup|-DisableStartup] [-SetupVad] [-DryRun]
+        [-CleanupBackend CHAIN] [-AudioDevice NAME] [-EnableStartup|-DisableStartup]
+        [-SetupVad] [-DryRun]
+        CHAIN: ordered, comma-separated pi, local, openai, claude, codex
+        (local only last), or off
   cleanup                  post-process stdin and write the chosen text
   cleanup-server           run the resident llama.cpp cleanup server
   vocab <command>          maintain vocabulary.conf

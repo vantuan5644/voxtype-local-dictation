@@ -7,11 +7,19 @@ param(
     [switch]$EnableStartup,
     [switch]$DisableStartup,
     [switch]$SetupVad,
+    # Ordered cleanup chain such as pi,local, or off. See voxtype-cleanup-backend.ps1.
+    [string]$CleanupBackend,
     [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'voxtype-cleanup-backend.ps1')
+$requestedBackend = $null
+if ($PSBoundParameters.ContainsKey('CleanupBackend')) {
+    try { $requestedBackend = ConvertTo-CleanupBackendChain $CleanupBackend }
+    catch { throw "-CleanupBackend: $($_.Exception.Message)" }
+}
 
 $roaming = if ($env:VOXTYPE_CONFIG_ROOT) {
     $env:VOXTYPE_CONFIG_ROOT
@@ -24,6 +32,7 @@ $vocabTarget = Join-Path $roaming 'vocabulary.conf'
 $defaultModel = Join-Path $local 'models\Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
 $modelPathFile = Join-Path $local 'cleanup-model.path'
 $startupMarker = Join-Path $local 'startup.enabled'
+$backendFile = Join-Path $local $CleanupBackendFileName
 if ([string]::IsNullOrWhiteSpace($CleanupModelPath)) { $CleanupModelPath = $defaultModel }
 if ($EnableStartup -and $DisableStartup) {
     throw '-EnableStartup and -DisableStartup cannot be used together'
@@ -35,13 +44,37 @@ function Invoke-Step {
     & $Action
 }
 
+# The chain cleanup will actually use once this run is done, with the same precedence
+# as voxtype-cleanup.ps1: the environment variable, this run's choice, the recorded one.
+$environmentBackend = [Environment]::GetEnvironmentVariable('VOXTYPE_CLEANUP_BACKEND')
+$effectiveSetting = if (-not [string]::IsNullOrEmpty($environmentBackend)) {
+    $environmentBackend
+} elseif ($null -ne $requestedBackend) { $requestedBackend } else {
+    Get-CleanupBackendSetting $local
+}
+$effectiveBackend = $null
+try { $effectiveBackend = ConvertTo-CleanupBackendChain $effectiveSetting }
+catch {
+    Write-Warning "Cleanup backend '$($effectiveSetting.Trim())' is invalid: $($_.Exception.Message)"
+    Write-Host 'Until it is fixed, cleanup returns the original transcript unchanged.'
+}
+
 Write-Host 'VoxType Windows setup'
 Write-Host "  config: $roaming"
 Write-Host "  models: $(Split-Path -Parent $CleanupModelPath)"
+if ($null -ne $effectiveBackend) { Write-Host "  cleanup: $effectiveBackend" }
+if (-not [string]::IsNullOrEmpty($environmentBackend)) {
+    Write-Warning "VOXTYPE_CLEANUP_BACKEND=$environmentBackend overrides $backendFile."
+}
 
 Invoke-Step "create $roaming and $local" {
     New-Item -ItemType Directory -Path $roaming, $local,
         (Split-Path -Parent $CleanupModelPath) -Force | Out-Null
+}
+if ($null -ne $requestedBackend) {
+    Invoke-Step "record cleanup backend $requestedBackend at $backendFile" {
+        [IO.File]::WriteAllText($backendFile, $requestedBackend, [Text.UTF8Encoding]::new($false))
+    }
 }
 if (-not (Test-Path -LiteralPath $vocabTarget -PathType Leaf)) {
     Invoke-Step "install starter vocabulary at $vocabTarget" {
@@ -123,12 +156,22 @@ if ($EnableStartup) {
         Remove-Item -LiteralPath $startupMarker -Force -ErrorAction SilentlyContinue
     }
 }
-if (-not (Test-Path -LiteralPath $CleanupModelPath -PathType Leaf)) {
+if ($null -ne $effectiveBackend) {
+    foreach ($cli in @('pi', 'claude', 'codex')) {
+        if (@($effectiveBackend.Split(',')) -contains $cli -and
+            $null -eq (Get-Command $cli -CommandType Application -ErrorAction SilentlyContinue)) {
+            Write-Warning "$cli is not on PATH; cleanup skips that backend until it is installed."
+        }
+    }
+}
+if ($null -ne $effectiveBackend -and (Test-CleanupChainHasLocal $effectiveBackend) -and
+    -not (Test-Path -LiteralPath $CleanupModelPath -PathType Leaf)) {
     Write-Warning "Cleanup model is missing: $CleanupModelPath"
     Write-Host 'Download it explicitly with:'
     Write-Host '  hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
     Write-Host "  Move the downloaded file to: $CleanupModelPath"
-    Write-Host 'Until then, cleanup returns the original transcript unchanged.'
+    Write-Host 'Until then, the local link is skipped; with nothing left to try, cleanup'
+    Write-Host 'returns the original transcript unchanged.'
 }
 
 if (-not $WhisperModelPath) {

@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
-using System.Net;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -64,7 +62,7 @@ internal sealed class BootstrapForm : Form
         Controls.Add(title);
         var detail = new Label();
         detail.Text = "Installs for your Windows account, then helps you choose a microphone, " +
-            "push-to-talk key, and local models.";
+            "push-to-talk key, transcript cleanup, and models.";
         detail.SetBounds(27, 70, 505, 42);
         Controls.Add(detail);
         progress.SetBounds(27, 125, 505, 19);
@@ -119,7 +117,7 @@ internal sealed class BootstrapForm : Form
         if (localManifest == null)
         {
             SetStatus("Downloading the signed release description...");
-            Download(OnlineManifestUrl, manifestPath);
+            Download(OnlineManifestUrl, manifestPath, null, "the release description");
         }
         var manifest = ReadManifest(manifestPath);
         ValidateManifest(manifest);
@@ -131,7 +129,7 @@ internal sealed class BootstrapForm : Form
         if (!File.Exists(packagePath))
         {
             SetStatus("Downloading VoxType...");
-            Download(manifest.MsixUrl, packagePath);
+            Download(manifest.MsixUrl, packagePath, manifest.MsixSha256, "VoxType");
         }
         SetStatus("Verifying the package...");
         try { VerifyHash(packagePath, manifest.MsixSha256); }
@@ -215,36 +213,71 @@ internal sealed class BootstrapForm : Form
             throw new InstallException(10, "VoxType requires 64-bit Windows 11 build 22621 or newer.");
     }
 
-    private static void Download(string url, string destination)
+    // ResumableDownload resumes the .partial, recovers one that is already complete,
+    // restarts a stalled connection and, given a digest, renames only after it matches.
+    private void Download(string url, string destination, string sha256, string description)
     {
         Uri uri;
         if (!Uri.TryCreate(url, UriKind.Absolute, out uri) || uri.Scheme != "https")
             throw new InstallException(20, "Download URL must use HTTPS.");
-        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-        var partial = destination + ".partial";
-        var existing = File.Exists(partial) ? new FileInfo(partial).Length : 0L;
-        var request = (HttpWebRequest)WebRequest.Create(uri);
-        request.UserAgent = "VoxType-Windows-Setup/" + ExpectedVersion;
-        if (existing > 0) request.AddRange(existing);
-        using (var response = (HttpWebResponse)request.GetResponse())
+        var download = new ResumableDownload
         {
-            var append = existing > 0 && response.StatusCode == HttpStatusCode.PartialContent;
-            using (var input = response.GetResponseStream())
-            using (var output = new FileStream(partial, append ? FileMode.Append : FileMode.Create,
-                FileAccess.Write, FileShare.None))
-                input.CopyTo(output);
+            Url = uri.AbsoluteUri,
+            Destination = destination,
+            Sha256 = sha256,
+            UserAgent = "VoxType-Windows-Setup/" + ExpectedVersion,
+            Progress = delegate(DownloadPhase phase, long received, long total)
+            {
+                ShowDownloadProgress(description, phase, received, total);
+            }
+        };
+        try { download.Run(); }
+        catch (InvalidDataException)
+        {
+            throw new InstallException(20, "The downloaded package failed its SHA-256 check.");
         }
-        if (File.Exists(destination)) File.Delete(destination);
-        File.Move(partial, destination);
+        finally { ShowMarquee(); }
+    }
+
+    private void ShowDownloadProgress(string description, DownloadPhase phase, long received,
+        long total)
+    {
+        string text;
+        if (phase == DownloadPhase.Verifying) text = "Verifying " + description + "...";
+        else if (phase == DownloadPhase.Resuming)
+            text = "The download of " + description + " stalled at " +
+                ResumableDownload.FormatBytes(received) + "; resuming...";
+        else text = "Downloading " + description + ": " + ResumableDownload.Describe(received, total);
+        var percent = phase == DownloadPhase.Downloading && total > 0 ?
+            (int)(Math.Min(received, total) * 100 / total) : -1;
+        RunOnUi(delegate
+        {
+            status.Text = text;
+            if (percent < 0) return;
+            progress.Style = ProgressBarStyle.Continuous;
+            progress.Value = percent;
+        });
+    }
+
+    private void ShowMarquee()
+    {
+        RunOnUi(delegate { progress.Style = ProgressBarStyle.Marquee; });
+    }
+
+    private void RunOnUi(Action action)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try
+        {
+            if (InvokeRequired) BeginInvoke(action);
+            else action();
+        }
+        catch (InvalidOperationException) { }
     }
 
     private static void VerifyHash(string path, string expected)
     {
-        string actual;
-        using (var stream = File.OpenRead(path))
-        using (var sha = SHA256.Create())
-            actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "");
-        if (!String.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+        if (!ResumableDownload.HashMatches(path, expected))
             throw new InstallException(20, "The downloaded package failed its SHA-256 check.");
     }
 
