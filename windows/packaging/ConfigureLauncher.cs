@@ -2,9 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
-using System.Net;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -45,6 +44,18 @@ internal sealed class ConfigureForm : Form
     private readonly ProgressBar progress = new ProgressBar();
     private readonly Button install = new Button();
     private readonly Button soundSettings = new Button();
+    private readonly Label summary = new Label();
+    private readonly ComboBox cleanup = new ComboBox();
+    private List<ModelEntry> catalog;
+
+    // The cleanup choices offered here, as chains for voxtype-setup.ps1 -CleanupBackend.
+    private static readonly string[] CleanupChains = { "pi", "pi,local", "local" };
+    private static readonly string[] CleanupLabels =
+    {
+        "Pi (hosted; sends transcript text)",
+        "Pi, then local Qwen if Pi is unavailable",
+        "Local Qwen only (2.5 GB download; text stays on this PC)"
+    };
 
     public ConfigureForm()
     {
@@ -52,17 +63,16 @@ internal sealed class ConfigureForm : Form
         dataDirectory = Path.Combine(Environment.GetFolderPath(
             Environment.SpecialFolder.LocalApplicationData), "VoxType");
         Text = "Set up VoxType";
-        ClientSize = new Size(700, 590);
-        MinimumSize = new Size(716, 629);
+        ClientSize = new Size(700, 635);
+        MinimumSize = new Size(716, 674);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
 
         var title = NewLabel("VoxType local dictation", 24, 18, 640, 35);
         title.Font = new Font("Segoe UI Semibold", 20F);
         Controls.Add(title);
-        Controls.Add(NewLabel(
-            "Speech and cleanup stay on this PC. Setup needs about 4 GB of free disk space.",
-            27, 58, 640, 35));
+        summary.SetBounds(27, 58, 640, 40);
+        Controls.Add(summary);
 
         var hardwareTitle = NewLabel("Hardware", 27, 102, 200, 24);
         hardwareTitle.Font = new Font("Segoe UI Semibold", 11F);
@@ -87,49 +97,130 @@ internal sealed class ConfigureForm : Form
         hotkey.KeyDown += CaptureHotkey;
         Controls.Add(hotkey);
 
-        var modelTitle = NewLabel("Models", 27, 269, 200, 24);
+        Controls.Add(NewLabel("Cleanup", 27, 266, 120, 24));
+        cleanup.SetBounds(150, 263, 516, 28);
+        cleanup.DropDownStyle = ComboBoxStyle.DropDownList;
+        cleanup.Items.AddRange(CleanupLabels);
+        cleanup.SelectedIndexChanged += delegate { UpdateSummary(); };
+        Controls.Add(cleanup);
+
+        var modelTitle = NewLabel("Models", 27, 314, 200, 24);
         modelTitle.Font = new Font("Segoe UI Semibold", 11F);
         Controls.Add(modelTitle);
-        onlineModels.SetBounds(30, 300, 610, 25);
-        onlineModels.Text = "Download the pinned transcription and cleanup models";
+        onlineModels.SetBounds(30, 345, 610, 25);
+        onlineModels.Text = "Download the pinned models";
         onlineModels.Checked = true;
         onlineModels.CheckedChanged += delegate { UpdateOfflineControls(); };
         Controls.Add(onlineModels);
-        offlineModels.SetBounds(30, 329, 610, 25);
+        offlineModels.SetBounds(30, 374, 610, 25);
         offlineModels.Text = "Use models from an offline release folder";
         offlineModels.CheckedChanged += delegate { UpdateOfflineControls(); };
         Controls.Add(offlineModels);
-        offlineDirectory.SetBounds(50, 360, 490, 28);
+        offlineDirectory.SetBounds(50, 405, 490, 28);
         offlineDirectory.Enabled = false;
         Controls.Add(offlineDirectory);
-        browse.SetBounds(550, 358, 116, 30);
+        browse.SetBounds(550, 403, 116, 30);
         browse.Text = "Browse...";
         browse.Enabled = false;
         browse.Click += ChooseOfflineDirectory;
         Controls.Add(browse);
 
-        startup.SetBounds(30, 410, 620, 28);
-        startup.Text = "Start dictation and local cleanup when I sign in";
+        startup.SetBounds(30, 455, 620, 28);
+        startup.Text = "Start VoxType when I sign in";
         startup.Checked = true;
         Controls.Add(startup);
 
-        progress.SetBounds(30, 455, 636, 20);
+        progress.SetBounds(30, 500, 636, 20);
         progress.Style = ProgressBarStyle.Continuous;
         Controls.Add(progress);
-        status.SetBounds(30, 482, 636, 38);
+        status.SetBounds(30, 527, 636, 38);
         status.Text = "Choose a microphone and push-to-talk key.";
         Controls.Add(status);
 
-        install.SetBounds(516, 531, 150, 36);
+        install.SetBounds(516, 576, 150, 36);
         install.Text = "Install models";
         install.Click += InstallClicked;
         Controls.Add(install);
+
+        try { catalog = LoadModels(); }
+        catch (Exception) { catalog = null; }
+        // A fresh install starts on Pi; a recorded choice that is offered here is kept.
+        var recorded = Array.IndexOf(CleanupChains, CleanupBackend.ReadRecorded(dataDirectory));
+        cleanup.SelectedIndex = recorded >= 0 ? recorded : 0;
+        UpdateSummary();
 
         Load += delegate
         {
             PopulateMicrophones();
             Task.Run((Action)CheckHardware);
         };
+    }
+
+    private string SelectedChain()
+    {
+        return CleanupChains[Math.Max(0, cleanup.SelectedIndex)];
+    }
+
+    private static bool ModelNeeded(ModelEntry model, string chain)
+    {
+        return model.Id != "cleanup" || CleanupBackend.ContainsLocal(chain);
+    }
+
+    // The header says where text goes for the chosen cleanup and how much disk the
+    // models it needs take, from the pinned catalog.
+    private void UpdateSummary()
+    {
+        var chain = SelectedChain();
+        var hosted = chain.Split(',')[0] == "pi";
+        var local = CleanupBackend.ContainsLocal(chain);
+        string text;
+        if (!hosted)
+            text = "Speech and cleanup stay on this PC.";
+        else if (local)
+            text = "Speech is transcribed on this PC. Cleanup sends the transcript text over " +
+                "the internet to a hosted model through Pi; local Qwen cleans it only when Pi " +
+                "is unavailable.";
+        else
+            text = "Speech is transcribed on this PC. Cleanup sends the transcript text over " +
+                "the internet to a hosted model through Pi.";
+        if (hosted && !OnPath("pi"))
+            text += local ? " Pi is not installed yet, so local Qwen does the cleanup until it is." :
+                " Pi is not installed yet, so text is typed without cleanup until it is.";
+        var bytes = RequiredModelBytes(chain);
+        if (bytes > 0)
+            text += " The models need " + ResumableDownload.FormatBytes(bytes) + " of disk space.";
+        summary.Text = text;
+    }
+
+    private long RequiredModelBytes(string chain)
+    {
+        if (catalog == null) return 0;
+        long total = 0;
+        foreach (var model in catalog)
+        {
+            if (!ModelNeeded(model, chain)) continue;
+            if (model.Size <= 0) return 0;
+            total += model.Size;
+        }
+        return total;
+    }
+
+    private static bool OnPath(string name)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var directory in path.Split(';'))
+        {
+            if (directory.Trim().Length == 0) continue;
+            foreach (var extension in new[] { ".exe", ".cmd", ".bat", ".com" })
+            {
+                try
+                {
+                    if (File.Exists(Path.Combine(directory.Trim(), name + extension))) return true;
+                }
+                catch (ArgumentException) { }
+            }
+        }
+        return false;
     }
 
     private static Label NewLabel(string text, int left, int top, int width, int height)
@@ -265,7 +356,11 @@ internal sealed class ConfigureForm : Form
         {
             var modelDirectory = Path.Combine(dataDirectory, "models");
             Directory.CreateDirectory(modelDirectory);
-            var models = LoadModels();
+            var chain = SelectedChain();
+            // The Qwen cleanup model is fetched only for a chain that can use it.
+            var models = new List<ModelEntry>();
+            foreach (var entry in LoadModels())
+                if (ModelNeeded(entry, chain)) models.Add(entry);
             string whisperPath = null;
             string cleanupPath = null;
             for (var index = 0; index < models.Count; index++)
@@ -281,7 +376,7 @@ internal sealed class ConfigureForm : Form
                 }
                 else
                 {
-                    await DownloadAndVerify(model, destination);
+                    await DownloadAndVerify(model, destination, index, models.Count);
                 }
                 if (model.Id == "whisper") whisperPath = destination;
                 if (model.Id == "cleanup") cleanupPath = destination;
@@ -293,7 +388,7 @@ internal sealed class ConfigureForm : Form
             await Task.Run(delegate
             {
                 ApplySettings((string)hotkey.Tag, selectedMicrophone, whisperPath,
-                    cleanupPath, enableStartup);
+                    cleanupPath, enableStartup, chain);
             });
             progress.Value = 90;
             SetStatus("Starting VoxType...");
@@ -344,7 +439,8 @@ internal sealed class ConfigureForm : Form
                 Name = RequiredString(item, "name"),
                 FileName = RequiredString(item, "fileName"),
                 Url = RequiredString(item, "url"),
-                Sha256 = RequiredString(item, "sha256")
+                Sha256 = RequiredString(item, "sha256"),
+                Size = OptionalSize(item)
             });
         }
         if (result.Count != 2) throw new InvalidDataException("Expected two pinned models.");
@@ -359,43 +455,80 @@ internal sealed class ConfigureForm : Form
         return Convert.ToString(value);
     }
 
-    private async Task DownloadAndVerify(ModelEntry model, string destination)
+    // The catalog's byte count lets an already complete .partial be verified without a
+    // request. Older catalogs omit it; the download then learns the length from the server.
+    private static long OptionalSize(Dictionary<string, object> values)
+    {
+        object value;
+        if (!values.TryGetValue("size", out value) || value == null) return 0;
+        long size;
+        if (!Int64.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture),
+                NumberStyles.None, CultureInfo.InvariantCulture, out size) || size <= 0)
+            throw new InvalidDataException("Dependency model entry has an invalid size.");
+        return size;
+    }
+
+    // Downloads run on a worker thread through ResumableDownload, which resumes .partial
+    // files, recovers a partial that is already complete, restarts stalled connections and
+    // renames only after the pinned SHA-256 matches.
+    private async Task DownloadAndVerify(ModelEntry model, string destination, int index, int count)
     {
         if (File.Exists(destination))
         {
             try
             {
+                SetStatus("Checking " + model.Name + " (SHA-256)...");
                 await Task.Run(delegate { VerifyHash(destination, model.Sha256); });
                 return;
             }
             catch (InvalidDataException) { File.Delete(destination); }
         }
-        var partial = destination + ".partial";
-        long existing = File.Exists(partial) ? new FileInfo(partial).Length : 0L;
-        var request = (HttpWebRequest)WebRequest.Create(model.Url);
-        request.UserAgent = "VoxType-Windows-Setup/1.0";
-        if (existing > 0) request.AddRange(existing);
-        using (var response = (HttpWebResponse)await request.GetResponseAsync())
+        var download = new ResumableDownload
         {
-            var append = existing > 0 && response.StatusCode == HttpStatusCode.PartialContent;
-            var mode = append ? FileMode.Append : FileMode.Create;
-            using (var input = response.GetResponseStream())
-            using (var output = new FileStream(partial, mode, FileAccess.Write, FileShare.None))
+            Url = model.Url,
+            Destination = destination,
+            Sha256 = model.Sha256,
+            ExpectedSize = model.Size,
+            UserAgent = "VoxType-Windows-Setup/1.0",
+            Progress = delegate(DownloadPhase phase, long received, long total)
             {
-                await input.CopyToAsync(output);
+                ShowDownloadProgress(model.Name, phase, received, total, index, count);
             }
-        }
+        };
+        await Task.Run((Action)download.Run);
+    }
+
+    // Model downloads share the first 70% of the bar, one equal slice per model.
+    private void ShowDownloadProgress(string name, DownloadPhase phase, long received,
+        long total, int index, int count)
+    {
+        string text;
+        if (phase == DownloadPhase.Verifying)
+            text = "Checking " + name + " (SHA-256)...";
+        else if (phase == DownloadPhase.Resuming)
+            text = "The " + name + " download stalled at " +
+                ResumableDownload.FormatBytes(received) + "; resuming...";
+        else
+            text = "Downloading " + name + ": " + ResumableDownload.Describe(received, total);
+        var span = 70 / count;
+        var value = index * span;
+        if (total > 0) value += (int)((long)span * Math.Min(received, total) / total);
+        RunOnUi(delegate
+        {
+            status.Text = text;
+            progress.Value = Math.Max(progress.Minimum, Math.Min(progress.Maximum, value));
+        });
+    }
+
+    private void RunOnUi(Action action)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
         try
         {
-            await Task.Run(delegate { VerifyHash(partial, model.Sha256); });
+            if (InvokeRequired) BeginInvoke(action);
+            else action();
         }
-        catch
-        {
-            File.Delete(partial);
-            throw;
-        }
-        if (File.Exists(destination)) File.Delete(destination);
-        File.Move(partial, destination);
+        catch (InvalidOperationException) { }
     }
 
     private static string FindOfflineFile(string root, string name)
@@ -419,23 +552,21 @@ internal sealed class ConfigureForm : Form
 
     private static void VerifyHash(string path, string expected)
     {
-        string actual;
-        using (var stream = File.OpenRead(path))
-        using (var sha = SHA256.Create())
-            actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
-        if (!String.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+        if (!ResumableDownload.HashMatches(path, expected))
             throw new InvalidDataException(Path.GetFileName(path) + " failed its SHA-256 check.");
     }
 
     private void ApplySettings(string key, string microphone, string whisper,
-        string cleanup, bool enableStartup)
+        string cleanupModel, bool enableStartup, string chain)
     {
         var script = Path.Combine(baseDirectory, "windows", "voxtype-setup.ps1");
         var arguments = new StringBuilder();
         arguments.Append("-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ");
         arguments.Append(Quote(script)).Append(" -Hotkey ").Append(Quote(key));
         arguments.Append(" -WhisperModelPath ").Append(Quote(whisper));
-        arguments.Append(" -CleanupModelPath ").Append(Quote(cleanup));
+        if (!String.IsNullOrEmpty(cleanupModel))
+            arguments.Append(" -CleanupModelPath ").Append(Quote(cleanupModel));
+        arguments.Append(" -CleanupBackend ").Append(Quote(chain));
         if (!String.IsNullOrWhiteSpace(microphone))
             arguments.Append(" -AudioDevice ").Append(Quote(microphone));
         arguments.Append(enableStartup ? " -EnableStartup" : " -DisableStartup");
@@ -446,10 +577,35 @@ internal sealed class ConfigureForm : Form
             throw new InvalidOperationException("VoxType rejected its settings. " + result.Output);
     }
 
+    // The GPU-resident cleanup server runs only for a chain that uses it; switching away
+    // from local stops this package's copy instead of leaving it holding memory.
     private void StartRuntime()
     {
         StartDetached(Path.Combine(baseDirectory, "voxtype.exe"), "");
-        StartDetached(Path.Combine(baseDirectory, "voxtype-cleanup-server.exe"), "");
+        if (CleanupBackend.WantsLocalServer(dataDirectory))
+            StartDetached(Path.Combine(baseDirectory, "voxtype-cleanup-server.exe"), "");
+        else
+            StopPackagedProcesses("voxtype-cleanup-server", "llama-server");
+    }
+
+    private void StopPackagedProcesses(params string[] names)
+    {
+        foreach (var name in names)
+        {
+            foreach (var process in Process.GetProcessesByName(name))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        var file = process.MainModule.FileName;
+                        if (file.StartsWith(baseDirectory, StringComparison.OrdinalIgnoreCase))
+                            process.Kill();
+                    }
+                    catch (Exception) { }
+                }
+            }
+        }
     }
 
     private static void StartDetached(string executable, string arguments)
@@ -513,6 +669,7 @@ internal sealed class ConfigureForm : Form
         onlineModels.Enabled = !busy;
         offlineModels.Enabled = !busy;
         microphones.Enabled = !busy;
+        cleanup.Enabled = !busy;
         hotkey.Enabled = !busy;
         startup.Enabled = !busy;
         browse.Enabled = !busy && offlineModels.Checked;
@@ -537,6 +694,7 @@ internal sealed class ConfigureForm : Form
         public string FileName;
         public string Url;
         public string Sha256;
+        public long Size;
     }
 
     private sealed class ProcessResult

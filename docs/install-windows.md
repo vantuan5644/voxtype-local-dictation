@@ -19,8 +19,8 @@ self-signed development certificate is a one-time administrator action.
 3. Download `VoxTypeSetup-<version>-x64.exe`.
 4. Confirm that Windows shows the expected publisher, then run the installer.
 5. Complete the setup window: choose a microphone, press the desired
-   push-to-talk key, select online models, and choose whether VoxType starts when
-   you sign in.
+   push-to-talk key, choose where transcript cleanup runs, select online models,
+   and choose whether VoxType starts when you sign in.
 6. Open Notepad, hold the selected key, speak, and release it.
 
 Importing a self-signed certificate grants it software-signing trust on the
@@ -54,15 +54,54 @@ The guided setup performs these operations for the current Windows account:
 - enumerates Windows microphones and records the selected device;
 - detects Vulkan through the packaged llama.cpp runtime and allows CPU fallback;
 - captures an explicit push-to-talk key;
-- downloads or imports
-  `ggml-large-v3-turbo-q5_0.bin` and
-  `Qwen3-4B-Instruct-2507-Q4_K_M.gguf`;
-- installs Silero voice activity detection and the guarded local cleanup command;
-- records the sign-in startup preference and starts the daemon and cleanup server;
-- preserves raw transcription whenever local cleanup is unavailable.
+- records the cleanup choice (see below);
+- downloads or imports `ggml-large-v3-turbo-q5_0.bin` (574 MB), and
+  `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` (2.5 GB) only for a cleanup choice that
+  uses local Qwen;
+- installs Silero voice activity detection and the guarded cleanup command;
+- records the sign-in startup preference and starts the daemon, plus the local
+  cleanup server when the choice uses local Qwen;
+- preserves raw transcription whenever cleanup is unavailable.
 
-Interrupted downloads remain as `.partial` files and resume on the next attempt.
-A completed model reaches its final filename only after its exact digest passes.
+Downloads show bytes and percent. A connection that delivers nothing for 60
+seconds is reopened from the `.partial` file, and an interrupted download resumes
+on the next attempt. A `.partial` that already holds the whole file, for example
+after setup closed while checking it, is verified instead of requested again. A
+model reaches its final filename only after its exact digest passes.
+
+### Cleanup choice
+
+The setup window offers three choices:
+
+| Choice | Chain | Text leaves the PC | Download |
+|---|---|---|---|
+| Pi (hosted; sends transcript text), the default | `pi` | yes, to Pi's hosted model | 574 MB |
+| Pi, then local Qwen if Pi is unavailable | `pi,local` | yes, unless Pi is unavailable | 3.07 GB |
+| Local Qwen only | `local` | no | 3.07 GB |
+
+The Pi choices need the `pi` CLI on `PATH`; until it is installed, that link is
+skipped. Setup records the choice for the current Windows account in
+`%LOCALAPPDATA%\VoxType\cleanup-backend`, a UTF-8 text file holding an ordered,
+comma-separated chain of `pi`, `local`, `openai`, `claude` and `codex`, or the
+single value `off`. `local` may only be the last link, so a local server that is
+merely down never sends text to a hosted backend. Cleanup tries each link in
+turn; a link that is unavailable, times out, fails, or returns text that breaks a
+guard falls through to the next, and the last resort is the raw transcription.
+An invalid file also returns the raw transcription.
+
+Precedence: `VOXTYPE_CLEANUP_BACKEND`, when set, then the file, then `local`
+(the behaviour of installs that predate the choice). Other tools can record a
+choice with the same parameter the window uses:
+
+```powershell
+voxtype-local setup -CleanupBackend pi,local
+voxtype-local setup -CleanupBackend local -DryRun   # show what would change
+```
+
+`-CleanupBackend` is validated before setup changes anything. Without it, setup
+keeps the recorded choice. The resident llama.cpp server starts at sign-in only
+when the effective chain contains `local` and the model named in
+`%LOCALAPPDATA%\VoxType\cleanup-model.path` exists.
 
 Configuration and vocabulary live under `%APPDATA%\VoxType`. Models, logs, and
 runtime state live under `%LOCALAPPDATA%\VoxType`. These directories persist
@@ -169,8 +208,9 @@ Configure the protected `windows-release` environment with:
 
 ## Verification
 
-Portable tests cover cleanup safety, vocabulary edits, setup configuration,
-dependency locking, bootstrap compilation, and PowerShell syntax:
+Portable tests cover cleanup safety, the cleanup chain, vocabulary edits, setup
+configuration, dependency locking, download recovery against a scripted local
+server, bootstrap compilation, and PowerShell syntax:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `

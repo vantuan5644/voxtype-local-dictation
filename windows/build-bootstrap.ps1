@@ -101,7 +101,8 @@ try {
     }
     & $csc /nologo /target:winexe /platform:x64 /optimize+ `
         /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
-        /reference:System.Web.Extensions.dll "/out:$setup" $temporarySource
+        /reference:System.Web.Extensions.dll "/out:$setup" $temporarySource `
+        (Join-Path $PSScriptRoot 'packaging\ResumableDownload.cs')
     if ($LASTEXITCODE -ne 0) { throw 'bootstrap compilation failed' }
 
     if (-not $SkipSigning) {
