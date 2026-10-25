@@ -44,7 +44,8 @@ Each offline archive contains:
 
 - the same signed bootstrap and MSIX published on GitHub;
 - the public signing certificate used by development releases;
-- the Whisper transcription model and Qwen cleanup model;
+- the two speech models, Parakeet Ultra (a folder of three files) and Whisper
+  large-v3-turbo, and the Qwen cleanup model;
 - exact source revisions, SHA-256 values, checksums, and third-party notices.
 
 ## What setup configures
@@ -52,15 +53,21 @@ Each offline archive contains:
 The guided setup performs these operations for the current Windows account:
 
 - enumerates Windows microphones and records the selected device;
-- detects Vulkan through the packaged llama.cpp runtime and allows CPU fallback;
+- detects Vulkan through the packaged llama.cpp runtime and allows CPU fallback
+  (for cleanup; speech runs on any DirectX 12 GPU through DirectML, else the CPU);
 - captures an explicit push-to-talk key;
 - records the cleanup choice (see below);
-- downloads or imports `ggml-large-v3-turbo-q5_0.bin` (574 MB), and
+- downloads or imports both speech models, Parakeet Ultra
+  (`parakeet-tdt-0.6b-ultra-fp16`, three files, 1.28 GB) for transcribing recordings and
+  `ggml-large-v3-turbo-q5_0.bin` (574 MB) for dictation, and sets `engine = whisper`
+  (`voxtype-setup.ps1 -Engine parakeet` dictates with Parakeet instead), and
   `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` (2.5 GB) only for a cleanup choice that
   uses local Qwen;
 - installs Silero voice activity detection and the guarded cleanup command;
 - records the sign-in startup preference and starts the daemon, plus the local
-  cleanup server when the choice uses local Qwen;
+  cleanup server when the choice uses local Qwen; once that server answers it
+  cleans two fixed sentences, so its slow first request (about 7 s on an
+  RTX 4090) does not land on your first dictation;
 - preserves raw transcription whenever cleanup is unavailable.
 
 Downloads show bytes and percent. A connection that delivers nothing for 60
@@ -75,9 +82,9 @@ The setup window offers three choices:
 
 | Choice | Chain | Text leaves the PC | Download |
 |---|---|---|---|
-| Local Qwen only, the default | `local` | no | 3.07 GB |
-| Pi (hosted; sends transcript text) | `pi` | yes, to Pi's hosted model | 574 MB |
-| Pi, then local Qwen if Pi is unavailable | `pi,local` | yes, unless Pi is unavailable | 3.07 GB |
+| Local Qwen only, the default | `local` | no | 4.35 GB |
+| Pi (hosted; sends transcript text) | `pi` | yes, to Pi's hosted model | 1.85 GB |
+| Pi, then local Qwen if Pi is unavailable | `pi,local` | yes, unless Pi is unavailable | 4.35 GB |
 
 The Pi choices need the `pi` CLI on `PATH`; until it is installed, that link is
 skipped. Setup records the choice for the current Windows account in
@@ -115,8 +122,9 @@ and `voxtype-local.exe` execution aliases.
 ## Maintainer release preparation
 
 `windows/dependencies.lock.json` is the release source of truth. It pins the
-Windows VoxType fork artifact, official llama.cpp Vulkan archive, both models,
-and their SHA-256 values. A Windows release remains blocked while the VoxType
+Windows VoxType fork artifact, official llama.cpp Vulkan archive, Microsoft's
+DirectML redistributable from NuGet, the three models (Parakeet's three files under
+`files`, kept in their own folder; Whisper's one file; Qwen), and their SHA-256 values. A Windows release remains blocked while the VoxType
 entry has a pending revision or digest.
 
 Preview the preparation first:
@@ -147,8 +155,10 @@ Windows SDK, CMake, Ninja, and the Vulkan SDK. Those packages are maintainer
 dependencies; end-user computers never receive them.
 
 The preparer verifies the lock, downloads with partial-file resume, builds or
-copies `voxtype.exe`, extracts `llama-server.exe` and its runtime DLLs, validates
-x64 PE headers, assembles notices, and writes `payload-manifest.json` with file
+copies `voxtype.exe`, extracts `DirectML.dll` from the pinned NuGet package and
+`llama-server.exe` with its runtime DLLs, checks that `voxtype.exe` has the
+Parakeet engine the pinned model needs (`--features gpu-vulkan,parakeet-directml`),
+validates x64 PE headers, assembles notices, and writes `payload-manifest.json` with file
 digests. Existing nonempty output requires `-Force`.
 
 Build the signed MSIX with a certificate from the Windows certificate store:

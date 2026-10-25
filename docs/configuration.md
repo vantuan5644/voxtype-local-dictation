@@ -19,6 +19,8 @@ selects replacements.
 | `hotkey.enabled` / `hotkey.mode` | `true` / `push_to_talk` | same | enabled only with `-Hotkey` / `push_to_talk` | Windows requires an explicit user choice |
 | `hotkey.key` | `FN` | `RIGHTALT` | user-selected | avoids an implicit Windows-wide key choice |
 | `whisper.language` | `en` | `en` | `en` | bilingual values were tried and reverted |
+| `engine` | — | — | `whisper` (`-Engine` changes it) | the engine dictation uses: Whisper with its prompt spells more of the user's terms; recordings run Parakeet by passing `--engine parakeet` to `voxtype transcribe` |
+| `parakeet.model` | — | — | wizard-managed local folder | Windows verifies the three pinned files before saving it |
 | `whisper.model` | user-selected | user-selected | wizard-managed local path | Windows verifies the pinned file before saving it |
 | `audio.device` | user-selected | user-selected | wizard-selected or Windows default | device names come from the daemon when available |
 | `text.filter_filler_words` | `true` | same | same | voxtype's own stripper still works when cleanup times out |
@@ -30,7 +32,7 @@ selects replacements.
 | `output.notification.on_recording_{start,stop}` | off with the OSD, on without | `false` | `true` | Windows v1 uses notifications for recording feedback |
 | `osd.enabled` | `false` | `true` | `false` | Windows OSD is deferred |
 | `output.post_process.command` | `~/.local/bin/voxtype-cleanup` | same | `voxtype-local.exe cleanup` | the guarded cleanup filter |
-| `whisper.initial_prompt` | **generated** | **generated** | **generated** | built from `[misheard]` in `vocabulary.conf` (see below) |
+| `whisper.initial_prompt` | **generated** | **generated** | **generated** | built from `[misheard]` in `vocabulary.conf` (see below); VoxType's Parakeet takes no prompt, so Parakeet's transcripts get the vocabulary only in cleanup |
 
 Report-only (rejected by `config set`, so the installers warn instead of
 set): `output.post_process.timeout_ms = 60000`. Add it under

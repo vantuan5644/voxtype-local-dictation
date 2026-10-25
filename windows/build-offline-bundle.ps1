@@ -58,12 +58,25 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses') `
         -Destination (Join-Path $bundleRoot 'LICENSES') -Recurse
     foreach ($model in $lock.models) {
-        $source = Join-Path $models ([string]$model.fileName)
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-            throw "model file is missing: $source"
+        # A model of several files (Parakeet) keeps them in its own folder, both in
+        # -ModelDirectory and in the bundle, where setup looks for it.
+        $sourceFolder = $models
+        $targetFolder = $bundleModels
+        $modelFiles = @($model)
+        if ($null -ne $model.PSObject.Properties['files']) {
+            $sourceFolder = Join-Path $models ([string]$model.directory)
+            $targetFolder = Join-Path $bundleModels ([string]$model.directory)
+            New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
+            $modelFiles = @($model.files)
         }
-        Assert-Hash $source ([string]$model.sha256)
-        Copy-Item -LiteralPath $source -Destination $bundleModels
+        foreach ($file in $modelFiles) {
+            $source = Join-Path $sourceFolder ([string]$file.fileName)
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                throw "model file is missing: $source"
+            }
+            Assert-Hash $source ([string]$file.sha256)
+            Copy-Item -LiteralPath $source -Destination $targetFolder
+        }
     }
     $checksums = Get-ChildItem -LiteralPath $bundleRoot -File -Recurse | Sort-Object FullName |
         ForEach-Object {

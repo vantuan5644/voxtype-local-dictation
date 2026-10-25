@@ -180,8 +180,9 @@ function Get-VoxtypeFromSource {
     if ($null -eq $cargo) { throw 'cargo.exe is required for -VoxtypeSource' }
     Push-Location $sourceRoot
     try {
+        # Whisper on Vulkan, Parakeet on DirectML, as the fork's Windows release builds it.
         & $cargo.Source build --locked --release --target x86_64-pc-windows-msvc `
-            --features gpu-vulkan
+            --features gpu-vulkan,parakeet-directml
         if ($LASTEXITCODE -ne 0) { throw 'VoxType source build failed' }
     } finally { Pop-Location }
     $built = Join-Path $sourceRoot 'target\x86_64-pc-windows-msvc\release\voxtype.exe'
@@ -189,6 +190,37 @@ function Get-VoxtypeFromSource {
         throw "VoxType build returned without $built"
     }
     Copy-Item -LiteralPath $built -Destination $Destination
+}
+
+function Copy-ArchiveEntry {
+    param([string]$Archive, [string]$Entry, [string]$Destination)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $found = $zip.Entries | Where-Object { $_.FullName.Replace('\', '/') -ceq $Entry } |
+            Select-Object -First 1
+        if ($null -eq $found) { throw "archive has no $Entry" }
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($found, $Destination, $true)
+    } finally { $zip.Dispose() }
+}
+
+# The pinned speech model must be one this voxtype.exe can run: a build without
+# Parakeet would leave setup failing on `config set engine parakeet`.
+function Assert-SpeechEngine {
+    param([string]$Executable, [object[]]$Models)
+    if (@($Models | Where-Object { [string]$_.id -ceq 'parakeet' }).Count -eq 0) { return }
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $listed = & $Executable info engines --json 2>$null
+        $exitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
+    if ($exitCode -ne 0) { throw 'voxtype.exe could not list its speech engines' }
+    $engines = @(($listed -join "`n") | ConvertFrom-Json)
+    if (@($engines | Where-Object { $_.name -ceq 'parakeet' -and $_.compiled }).Count -eq 0) {
+        throw ('voxtype.exe is built without Parakeet, the speech model dependencies.lock.json ' +
+            'pins. Use a fork release built with --features gpu-vulkan,parakeet-directml.')
+    }
 }
 
 if (-not (Test-Path -LiteralPath $DependencyLock -PathType Leaf)) {
@@ -205,9 +237,15 @@ Assert-HashText ([string]$lock.voxtype.sha256) 'voxtype.sha256' `
     -AllowMissing:($PSCmdlet.ParameterSetName -ne 'PinnedRelease' -or -not $Apply)
 Assert-HttpsUrl ([string]$lock.llamaCpp.url) 'llamaCpp.url'
 Assert-HashText ([string]$lock.llamaCpp.sha256) 'llamaCpp.sha256'
+Assert-HttpsUrl ([string]$lock.directml.url) 'directml.url'
+Assert-HashText ([string]$lock.directml.sha256) 'directml.sha256'
 foreach ($model in $lock.models) {
-    Assert-HttpsUrl ([string]$model.url) "models.$($model.id).url"
-    Assert-HashText ([string]$model.sha256) "models.$($model.id).sha256"
+    # A model of several files (Parakeet) lists them under files.
+    $modelFiles = if ($null -ne $model.PSObject.Properties['files']) { @($model.files) } else { @($model) }
+    foreach ($file in $modelFiles) {
+        Assert-HttpsUrl ([string]$file.url) "models.$($model.id).url"
+        Assert-HashText ([string]$file.sha256) "models.$($model.id).sha256"
+    }
 }
 
 $output = Resolve-FullPath $OutputDirectory
@@ -222,6 +260,7 @@ $sourceDescription = switch ($PSCmdlet.ParameterSetName) {
 Write-Host 'VoxType Windows release preparation'
 Write-Host "  source: $sourceDescription"
 Write-Host "  llama.cpp: $($lock.llamaCpp.version)"
+Write-Host "  DirectML: $($lock.directml.version)"
 Write-Host "  output: $output"
 if (-not $Apply) {
     if ($PSCmdlet.ParameterSetName -eq 'PinnedRelease' -and
@@ -276,6 +315,14 @@ try {
         }
     }
     Assert-X64Pe $voxtypeTarget
+
+    # voxtype.exe loads DirectML.dll at start (Parakeet's GPU path), so the pinned
+    # redistributable sits beside it instead of whatever version Windows has.
+    $directmlArchive = Join-Path $downloadRoot 'directml.zip'
+    Receive-LockedFile $lock.directml $directmlArchive 'DirectML redistributable'
+    Copy-ArchiveEntry $directmlArchive ([string]$lock.directml.archiveEntry) `
+        (Join-Path $payloadStage 'DirectML.dll')
+    Assert-SpeechEngine $voxtypeTarget @($lock.models)
 
     $llamaArchive = Join-Path $downloadRoot 'llama.zip'
     Receive-LockedFile $lock.llamaCpp $llamaArchive 'llama.cpp Vulkan runtime'
@@ -335,6 +382,12 @@ try {
             source = [string]$lock.llamaCpp.url
             sourceRevision = [string]$lock.llamaCpp.sourceRevision
             sha256 = (Get-FileHash (Join-Path $payloadStage 'llama-server.exe') `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        directml = [ordered]@{
+            version = [string]$lock.directml.version
+            source = [string]$lock.directml.url
+            sha256 = (Get-FileHash (Join-Path $payloadStage 'DirectML.dll') `
                 -Algorithm SHA256).Hash.ToLowerInvariant()
         }
         files = @(Get-ChildItem -LiteralPath $payloadStage -File | Sort-Object Name |

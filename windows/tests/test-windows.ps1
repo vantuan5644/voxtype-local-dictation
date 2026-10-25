@@ -112,23 +112,53 @@ if ($LASTEXITCODE -ne 0 -or $prepareText -notlike '*Dry run complete*') {
 }
 try {
     $dependencyData = Get-Content -LiteralPath $dependencyLock -Raw | ConvertFrom-Json
-    if ($dependencyData.schemaVersion -ne 1 -or @($dependencyData.models).Count -ne 2) {
+    if ($dependencyData.schemaVersion -ne 1 -or @($dependencyData.models).Count -ne 3) {
         $failures.Add('dependency lock shape is invalid')
     }
+    # Recordings run Parakeet and dictation Whisper (DECISIONS.md, Which engine where), with
+    # Qwen for cleanup.
+    $modelIds = @($dependencyData.models | ForEach-Object { [string]$_.id }) -join ','
+    Assert-Equal 'dependency lock pins Parakeet, Whisper and the cleanup model' 'parakeet,whisper,cleanup' $modelIds
     foreach ($model in $dependencyData.models) {
-        if ($model.url -notmatch '^https://' -or $model.sha256 -notmatch '^[0-9a-f]{64}$') {
-            $failures.Add("dependency model is not pinned: $($model.id)")
-        }
-        # The size lets setup verify an already complete .partial without a request.
-        $size = $model.PSObject.Properties['size']
-        if ($null -eq $size -or [string]$size.Value -notmatch '^[1-9][0-9]*$') {
-            $failures.Add("dependency model has no positive byte size: $($model.id)")
+        # A model of several files lists them under files, in its own folder.
+        $modelFiles = if ($null -ne $model.PSObject.Properties['files']) {
+            if ([string]$model.directory -notmatch '^[A-Za-z0-9._-]+$') {
+                $failures.Add("dependency model has no plain folder name: $($model.id)")
+            }
+            @($model.files)
+        } else { @($model) }
+        foreach ($file in $modelFiles) {
+            if ($file.url -notmatch '^https://' -or $file.sha256 -notmatch '^[0-9a-f]{64}$' -or
+                [string]$file.fileName -notmatch '^[A-Za-z0-9._-]+$') {
+                $failures.Add("dependency model is not pinned: $($model.id) $($file.fileName)")
+            }
+            # The size lets setup verify an already complete .partial without a request.
+            $size = $file.PSObject.Properties['size']
+            if ($null -eq $size -or [string]$size.Value -notmatch '^[1-9][0-9]*$') {
+                $failures.Add("dependency model has no positive byte size: $($model.id) $($file.fileName)")
+            }
         }
     }
 } catch { $failures.Add("dependency lock failed to parse: $($_.Exception.Message)") }
 try {
-    [xml](Get-Content -LiteralPath (Join-Path $windowsRoot `
-        'packaging\AppxManifest.xml.in') -Raw) | Out-Null
+    $manifestTemplate = [xml](Get-Content -LiteralPath (Join-Path $windowsRoot `
+        'packaging\AppxManifest.xml.in') -Raw)
+    # Windows refuses to start a packaged exe that no Application names (win32 error 5),
+    # even from inside the package, so every exe the builder stages needs one.
+    $declared = @($manifestTemplate.Package.Applications.Application |
+        ForEach-Object { $_.Executable })
+    $builderText = Get-Content -LiteralPath (Join-Path $windowsRoot 'build-msix.ps1') -Raw
+    $staged = @([regex]::Matches($builderText,
+            "(?:Copy-RequiredFile|Join-Path \`$staging) '([^']+\.exe)'") |
+        ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    if ($staged.Count -lt 7) {
+        $failures.Add("found only $($staged.Count) of the exes build-msix.ps1 stages")
+    }
+    foreach ($name in $staged) {
+        if ($name -notin $declared) {
+            $failures.Add("MSIX manifest has no Application for $name, so Windows would refuse to start it")
+        }
+    }
 } catch { $failures.Add("MSIX manifest template failed to parse: $($_.Exception.Message)") }
 try {
     $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
@@ -484,7 +514,58 @@ exit /b 0
         if (-not (Test-Path -LiteralPath (Join-Path $testDataRoot 'startup.enabled'))) {
             $failures.Add('setup did not record the startup preference')
         }
+        if (-not $calls.Contains('config set engine whisper')) {
+            $failures.Add('setup with a Whisper model did not select the Whisper engine')
+        }
     }
+
+    # -ParakeetModelPath sets the model folder, then the engine.
+    $fakeParakeet = Join-Path $tempDir 'parakeet-model'
+    New-Item -ItemType Directory -Path $fakeParakeet | Out-Null
+    [IO.File]::WriteAllText($testLog, '', [Text.Encoding]::ASCII)
+    $parakeetOutput = & $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File $setup -Hotkey F13 -ParakeetModelPath $fakeParakeet 6>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        $failures.Add("setup -ParakeetModelPath exited $LASTEXITCODE`n$parakeetOutput")
+    } else {
+        $calls = [IO.File]::ReadAllText($testLog)
+        $modelCall = $calls.IndexOf("config set parakeet.model $fakeParakeet")
+        $engineCall = $calls.IndexOf('config set engine parakeet')
+        if ($modelCall -lt 0 -or $engineCall -lt $modelCall) {
+            $failures.Add("setup did not set the Parakeet model, then the engine`n$calls")
+        }
+        if ($calls.Contains('config set whisper.model')) {
+            $failures.Add('setup -ParakeetModelPath also set a Whisper model')
+        }
+    }
+    # Both models: both are set, then the engine, Whisper unless -Engine names Parakeet.
+    foreach ($case in @(@{ Arguments = @(); Engine = 'whisper' },
+            @{ Arguments = @('-Engine', 'Parakeet'); Engine = 'parakeet' })) {
+        [IO.File]::WriteAllText($testLog, '', [Text.Encoding]::ASCII)
+        $bothOutput = & $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $setup `
+            -Hotkey F13 -WhisperModelPath $fakeWhisper -ParakeetModelPath $fakeParakeet @($case.Arguments) `
+            6>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            $failures.Add("setup with both models exited $LASTEXITCODE`n$bothOutput")
+            continue
+        }
+        $calls = [IO.File]::ReadAllText($testLog)
+        $engineCall = $calls.IndexOf("config set engine $($case.Engine)")
+        $lastModel = [Math]::Max($calls.IndexOf("config set whisper.model $fakeWhisper"),
+            $calls.IndexOf("config set parakeet.model $fakeParakeet"))
+        if ($calls.IndexOf("config set whisper.model $fakeWhisper") -lt 0 -or
+                $calls.IndexOf("config set parakeet.model $fakeParakeet") -lt 0 -or $engineCall -lt $lastModel) {
+            $failures.Add("setup with both models did not set both, then engine $($case.Engine)`n$calls")
+        }
+    }
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $setup `
+            -Engine moonshine 2>&1 | Out-Null
+        $badEngineExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
+    if ($badEngineExit -eq 0) { $failures.Add('setup accepted an engine other than whisper or parakeet') }
 
     # -CleanupBackend: validated before anything changes, recorded only when given, and
     # the missing-Qwen warning only for a chain that can use the local model.
@@ -546,7 +627,7 @@ exit /b 0
     $fakeModels = Join-Path $tempDir 'models'
     New-Item -ItemType Directory -Path $fakeModels | Out-Null
     $fakeModelEntries = @()
-    foreach ($modelName in @('whisper.bin', 'cleanup.gguf')) {
+    foreach ($modelName in @('cleanup.gguf')) {
         $modelPath = Join-Path $fakeModels $modelName
         [IO.File]::WriteAllText($modelPath, "model $modelName", [Text.Encoding]::ASCII)
         $fakeModelEntries += [ordered]@{
@@ -555,8 +636,25 @@ exit /b 0
             sha256 = (Get-FileHash $modelPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
     }
+    # A model of several files is a folder, in -ModelDirectory and in the bundle.
+    $fakeParakeetFolder = Join-Path $fakeModels 'parakeet-test'
+    New-Item -ItemType Directory -Path $fakeParakeetFolder | Out-Null
+    $fakeParakeetFiles = @()
+    foreach ($modelName in @('encoder-model.onnx', 'vocab.txt')) {
+        $modelPath = Join-Path $fakeParakeetFolder $modelName
+        [IO.File]::WriteAllText($modelPath, "model $modelName", [Text.Encoding]::ASCII)
+        $fakeParakeetFiles += [ordered]@{
+            fileName = $modelName
+            sha256 = (Get-FileHash $modelPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $fakeModelEntries += [ordered]@{
+        id = 'parakeet'
+        directory = 'parakeet-test'
+        files = $fakeParakeetFiles
+    }
     $fakeLock = Join-Path $tempDir 'dependencies.lock.json'
-    @{ models = $fakeModelEntries } | ConvertTo-Json -Depth 4 |
+    @{ models = $fakeModelEntries } | ConvertTo-Json -Depth 6 |
         Set-Content -LiteralPath $fakeLock -Encoding UTF8
     & $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
         -File $offlineBuilder -ReleaseDirectory $bootstrapOutput `
@@ -577,6 +675,12 @@ exit /b 0
             if (-not ($archiveEntries -contains `
                     'VoxType-0.0.0.1-offline/VoxType-0.0.0.1-signing.cer')) {
                 $failures.Add('offline bundle omitted the public signing certificate')
+            }
+            foreach ($expected in @('models/cleanup.gguf', 'models/parakeet-test/encoder-model.onnx',
+                    'models/parakeet-test/vocab.txt')) {
+                if (-not ($archiveEntries -contains "VoxType-0.0.0.1-offline/$expected")) {
+                    $failures.Add("offline bundle has no $expected")
+                }
             }
         } finally { $zip.Dispose() }
     }
@@ -609,13 +713,74 @@ exit /b 0
 
     $fakeServer = Join-Path $tempDir 'fake-llama-server.cmd'
     $serverCallLog = Join-Path $tempDir 'llama-server-calls.log'
+    # Like llama-server, the fake logs to stderr. Serving, it answers /health and chat
+    # completions on its port until the warm-up's two requests are in.
     $fakeServerSource = @'
 @echo off
 >>"%VOXTYPE_TEST_LOG%" echo %*
-if "%~1"=="--list-devices" echo Vulkan0: Test GPU
-exit /b 0
+>&2 echo fake server log line
+if "%~1"=="--list-devices" (
+    echo Vulkan0: Test GPU
+    exit /b 0
+)
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0fake-llama-http.ps1" %*
+exit /b %ERRORLEVEL%
 '@
     [IO.File]::WriteAllText($fakeServer, $fakeServerSource, [Text.Encoding]::ASCII)
+    $fakeHttpSource = @'
+$port = [int]$args[[Array]::IndexOf($args, '--port') + 1]
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
+$listener.Start()
+$completions = 0
+$deadline = [DateTime]::UtcNow.AddSeconds(30)
+try {
+    while ($completions -lt 2 -and [DateTime]::UtcNow -lt $deadline) {
+        if (-not $listener.Pending()) { Start-Sleep -Milliseconds 20; continue }
+        $client = $listener.AcceptTcpClient()
+        try {
+            $stream = $client.GetStream()
+            $head = [Collections.Generic.List[byte]]::new()
+            while ($head.Count -lt 4 -or $head[$head.Count - 4] -ne 13 -or
+                    $head[$head.Count - 3] -ne 10 -or $head[$head.Count - 2] -ne 13 -or
+                    $head[$head.Count - 1] -ne 10) {
+                $value = $stream.ReadByte()
+                if ($value -lt 0) { break }
+                $head.Add([byte]$value)
+            }
+            $headers = [Text.Encoding]::ASCII.GetString($head.ToArray())
+            $body = ''
+            if ($headers -match '(?im)^Content-Length:\s*(\d+)') {
+                $bytes = [byte[]]::new([int]$matches[1])
+                $read = 0
+                while ($read -lt $bytes.Length) {
+                    $count = $stream.Read($bytes, $read, $bytes.Length - $read)
+                    if ($count -le 0) { break }
+                    $read += $count
+                }
+                $body = [Text.Encoding]::UTF8.GetString($bytes, 0, $read)
+            }
+            if ($headers.StartsWith('POST /v1/chat/completions')) {
+                $completions++
+                [IO.File]::AppendAllText($env:VOXTYPE_TEST_LOG, "completion $body`r`n")
+                $answer = '{"choices":[{"message":{"content":"Warm."}}]}'
+            } else { $answer = '{"status":"ok"}' }
+            $payload = [Text.Encoding]::UTF8.GetBytes($answer)
+            $reply = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`n" +
+                "Content-Type: application/json`r`nContent-Length: $($payload.Length)`r`n" +
+                "Connection: close`r`n`r`n")
+            $stream.Write($reply, 0, $reply.Length)
+            $stream.Write($payload, 0, $payload.Length)
+            $stream.Flush()
+        } catch {
+            # A client that gave up, such as a health check past its 1 s timeout, resets
+            # its connection. llama-server serves the next one, and so does this.
+        } finally { $client.Close() }
+    }
+} finally { $listener.Stop() }
+exit 0
+'@
+    [IO.File]::WriteAllText((Join-Path $tempDir 'fake-llama-http.ps1'), $fakeHttpSource,
+        [Text.Encoding]::ASCII)
     $fakeModel = Join-Path $tempDir 'cleanup.gguf'
     [IO.File]::WriteAllText($fakeModel, 'test model', [Text.Encoding]::ASCII)
     $reservation = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -627,10 +792,23 @@ exit /b 0
     $env:VOXTYPE_CLEANUP_ENDPOINT = "http://127.0.0.1:$serverPort"
     $env:VOXTYPE_TEST_LOG = $serverCallLog
     Remove-Item Env:LLAMA_DEVICE -ErrorAction SilentlyContinue
-    & $shell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    # The package runs this with Windows PowerShell 5.1, whose handling of a native
+    # program's stderr differs from PowerShell 7's.
+    $packagedShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # The warm-up must leave a registered history inbox empty.
+    $warmUpInbox = Join-Path $tempDir 'warm-up-inbox'
+    [IO.Directory]::CreateDirectory($env:VOXTYPE_DATA_ROOT) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $env:VOXTYPE_DATA_ROOT 'dictation-history.json'),
+        (@{ schema = 1; inbox = $warmUpInbox } | ConvertTo-Json -Compress),
+        [Text.UTF8Encoding]::new($false))
+    & $packagedShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
         -File $serverScript | Out-Null
+    $serverLog = Join-Path $env:VOXTYPE_DATA_ROOT 'logs\llama-server.log'
     if ($LASTEXITCODE -ne 0) {
         $failures.Add("cleanup server exited $LASTEXITCODE")
+    } elseif (-not (Test-Path -LiteralPath $serverLog) -or
+        -not [IO.File]::ReadAllText($serverLog).Contains('fake server log line')) {
+        $failures.Add('cleanup server output did not reach llama-server.log')
     } else {
         $serverCalls = [IO.File]::ReadAllText($serverCallLog)
         if (-not $serverCalls.Contains('--list-devices')) {
@@ -641,6 +819,18 @@ exit /b 0
         }
         if (-not $serverCalls.Contains('--device Vulkan0')) {
             $failures.Add('cleanup server did not select the first Vulkan device')
+        }
+        $warmUps = [regex]::Matches($serverCalls, '(?m)^completion ').Count
+        if ($warmUps -ne 2) {
+            $failures.Add("cleanup server warm-up sent $warmUps of its 2 requests")
+        } elseif (-not $serverCalls.Contains('"model":"qwen3-4b-instruct-2507"')) {
+            $failures.Add('cleanup server warm-up did not ask for the local model')
+        }
+        # The second warm-up cleanup may still be finishing.
+        Start-Sleep -Milliseconds 1500
+        if ((Test-Path -LiteralPath $warmUpInbox) -and
+            @(Get-ChildItem -LiteralPath $warmUpInbox -File).Count -gt 0) {
+            $failures.Add('cleanup server warm-up reached the dictation history')
         }
     }
 } finally {

@@ -49,6 +49,7 @@ Create the payload first:
 Required payload directory contents:
   voxtype.exe                 native x64 Windows port
   llama-server.exe            native x64 Vulkan server
+  DirectML.dll                pinned DirectML redistributable voxtype.exe loads
   payload-manifest.json       versions, HTTPS sources, and SHA-256 digests
   dependencies.lock.json      pinned model catalog used by first-run setup
   THIRD_PARTY_NOTICES.txt     notices for bundled dependencies
@@ -165,7 +166,7 @@ function Get-SigningCertificate {
     return $certificate
 }
 
-$requiredPayload = @('voxtype.exe', 'llama-server.exe', 'payload-manifest.json',
+$requiredPayload = @('voxtype.exe', 'llama-server.exe', 'DirectML.dll', 'payload-manifest.json',
     'dependencies.lock.json', 'THIRD_PARTY_NOTICES.txt')
 $missingPayload = @($requiredPayload | Where-Object {
         -not (Test-Path -LiteralPath (Join-Path $PayloadDirectory $_) -PathType Leaf)
@@ -196,27 +197,50 @@ try {
 }
 Assert-PayloadMetadata 'voxtype' $voxtypePayload $metadata
 Assert-PayloadMetadata 'llamaCpp' $llamaPayload $metadata
+Assert-PayloadMetadata 'directml' (Join-Path $PayloadDirectory 'DirectML.dll') $metadata
 try {
     $dependencies = Get-Content -LiteralPath $dependencyLock -Raw | ConvertFrom-Json
 } catch {
     throw "dependencies.lock.json is invalid JSON: $($_.Exception.Message)"
 }
-if ($dependencies.schemaVersion -ne 1 -or @($dependencies.models).Count -ne 2) {
-    throw 'dependencies.lock.json must use schemaVersion 1 and contain two models'
+# The cleanup model and one or both speech models (Parakeet for recordings, Whisper for
+# dictation).
+$modelIds = @($dependencies.models | ForEach-Object { [string]$_.id })
+$speechIds = @($modelIds | Where-Object { $_ -cin @('parakeet', 'whisper') } | Select-Object -Unique)
+if ($dependencies.schemaVersion -ne 1 -or @($modelIds | Where-Object { $_ -ceq 'cleanup' }).Count -ne 1 -or
+    $speechIds.Count -lt 1 -or $modelIds.Count -ne $speechIds.Count + 1) {
+    throw ('dependencies.lock.json must use schemaVersion 1 and pin the cleanup model with ' +
+        'one or both speech models (parakeet, whisper)')
 }
 foreach ($model in $dependencies.models) {
-    foreach ($property in @('id', 'name', 'fileName', 'url', 'sha256')) {
+    foreach ($property in @('id', 'name')) {
         if ([string]::IsNullOrWhiteSpace([string]$model.$property)) {
             throw "dependency model '$($model.id)' has no $property"
         }
     }
-    $modelUri = $null
-    if (-not [Uri]::TryCreate([string]$model.url, [UriKind]::Absolute, [ref]$modelUri) -or
-        $modelUri.Scheme -cne 'https') {
-        throw "dependency model '$($model.id)' URL must use HTTPS"
+    # A model of several files (Parakeet) lists them under files, kept in its own folder.
+    $modelFiles = @($model)
+    if ($null -ne $model.PSObject.Properties['files']) {
+        if ([string]$model.directory -notmatch '^[A-Za-z0-9._-]+$') {
+            throw "dependency model '$($model.id)' has no plain folder name"
+        }
+        $modelFiles = @($model.files)
     }
-    if ([string]$model.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
-        throw "dependency model '$($model.id)' has an invalid SHA-256 digest"
+    foreach ($file in $modelFiles) {
+        foreach ($property in @('fileName', 'url', 'sha256')) {
+            if ($null -eq $file.PSObject.Properties[$property] -or
+                [string]::IsNullOrWhiteSpace([string]$file.$property)) {
+                throw "dependency model '$($model.id)' has a file without $property"
+            }
+        }
+        $modelUri = $null
+        if (-not [Uri]::TryCreate([string]$file.url, [UriKind]::Absolute, [ref]$modelUri) -or
+            $modelUri.Scheme -cne 'https') {
+            throw "dependency model '$($model.id)' URL must use HTTPS"
+        }
+        if ([string]$file.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "dependency model '$($model.id)' has an invalid SHA-256 digest"
+        }
     }
 }
 $signingCertificate = Get-SigningCertificate
@@ -262,7 +286,9 @@ try {
         Where-Object { $_.Extension -in @('.dll', '.json') -and
             $_.Name -notin @('payload-manifest.json', 'dependencies.lock.json') }
     $runtimeFiles | Copy-Item -Destination $staging
-    $runtimeFiles | Copy-Item -Destination (Join-Path $staging 'windows\bin')
+    # DirectML.dll is for voxtype.exe alone, so it is not copied again beside llama-server.
+    $runtimeFiles | Where-Object { $_.Name -cne 'DirectML.dll' } |
+        Copy-Item -Destination (Join-Path $staging 'windows\bin')
     Copy-Item -LiteralPath (Join-Path $PayloadDirectory 'llama-server.exe') `
         -Destination (Join-Path $staging 'windows\bin\llama-server.exe')
     foreach ($file in @('voxtype-local.ps1', 'voxtype-cleanup.ps1', 'voxtype-cleanup-backend.ps1',
@@ -337,6 +363,16 @@ try {
     $manifest = $manifest.Replace('@@VERSION@@', $Version)
     [IO.File]::WriteAllText((Join-Path $staging 'AppxManifest.xml'), $manifest,
         [Text.UTF8Encoding]::new($false))
+    # Windows refuses to start a packaged exe that no Application names (win32 error 5),
+    # even from inside the package, so an undeclared one would ship broken.
+    $declared = @(([xml]$manifest).Package.Applications.Application |
+        ForEach-Object { $_.Executable })
+    foreach ($executable in Get-ChildItem -LiteralPath $staging -Filter '*.exe' -File -Recurse) {
+        $relative = $executable.FullName.Substring($staging.Length + 1)
+        if ($relative -notin $declared) {
+            throw "$relative has no Application in AppxManifest.xml.in, so Windows would refuse to start it"
+        }
+    }
 
     $signTool = $null
     $baseSignArgs = @()

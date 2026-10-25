@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "voxtype": {
-    "version": "1.0.1-windows.1",
-    "sourceRevision": "ba37799bcc12d8e0daca173fb962a56f27ca81ad",
-    "url": "https://github.com/vantuan5644/voxtype/releases/download/v1.0.1-windows.1/voxtype-v1.0.1-windows.1-x64-vulkan.zip",
-    "sha256": "f26c451370435ae88ce5314dbd7b38838e31277a28e47bae5ae025510dee4b7c",
+    "version": "1.0.1-windows.2",
+    "sourceRevision": "29b67752f5715bbf6ad24eb1e0042b8b6f276369",
+    "url": "https://github.com/vantuan5644/voxtype/releases/download/v1.0.1-windows.2/voxtype-v1.0.1-windows.2-x64-vulkan.zip",
+    "sha256": "f11ec1e18b4f900bcb87f1866f35888829cb33ceafacde603a5aa3a720cc7dd3",
     "archiveEntry": "voxtype.exe"
   },
   "llamaCpp": {
@@ -14,7 +14,39 @@
     "sha256": "388964372f65f71a5268e8c65bb2a57576ede88a8495897aa194c95c792a6820",
     "archiveEntry": "llama-server.exe"
   },
+  "directml": {
+    "version": "1.15.4",
+    "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+    "sha256": "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+    "archiveEntry": "bin/x64-win/DirectML.dll"
+  },
   "models": [
+    {
+      "id": "parakeet",
+      "name": "Parakeet TDT 0.6B Ultra (ONNX fp16)",
+      "directory": "parakeet-tdt-0.6b-ultra-fp16",
+      "sourceRevision": "99b09f030a5a6efeaa13cf2cf54592100ce2c3f1",
+      "files": [
+        {
+          "fileName": "encoder-model.onnx",
+          "url": "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1/encoder-model.fp16.onnx?download=true",
+          "sha256": "f1da16b46daeb9b5430e2fb5743efb42f49998d2e45cfd48fcf4f2965e45dd4d",
+          "size": 1239245869
+        },
+        {
+          "fileName": "decoder_joint-model.onnx",
+          "url": "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1/decoder_joint-model.fp16.onnx?download=true",
+          "sha256": "e2d0d174a2ca425aaf3a4161bd43c9487e4060e74c88dac2771913238876111d",
+          "size": 36268312
+        },
+        {
+          "fileName": "vocab.txt",
+          "url": "https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx/resolve/99b09f030a5a6efeaa13cf2cf54592100ce2c3f1/vocab.txt?download=true",
+          "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+          "size": 93939
+        }
+      ]
+    },
     {
       "id": "whisper",
       "name": "Whisper Large v3 Turbo Q5",
