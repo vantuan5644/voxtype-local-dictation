@@ -54,7 +54,18 @@ $arguments = [System.Collections.Generic.List[string]]::new()
 foreach ($value in @('--model', $model, '--alias', $modelAlias, '--host',
         '127.0.0.1', '--port', [string]$endpointUri.Port, '--ctx-size', '4096', '--temp', '0', '--top-p',
         '1', '--parallel', '1', '--no-webui')) { $arguments.Add($value) }
-$devices = & $server --list-devices 2>&1 | Out-String
+# Windows PowerShell 5.1, which the package runs this with, turns each line a native
+# program writes to a redirected stderr into an error record, and under 'Stop' the first
+# one ends this script and the server with it. llama-server logs to stderr.
+$ErrorActionPreference = 'Continue'
+try {
+    $devices = (& $server --list-devices 2>&1 | ForEach-Object { "$_" }) -join "`n"
+} catch {
+    # Windows refuses a packaged exe the manifest does not declare; say so in the log.
+    [IO.File]::AppendAllText($logPath,
+        "$(Get-Date -Format o) llama-server could not start: $($_.Exception.Message)`r`n")
+    exit 0
+}
 if ($LASTEXITCODE -ne 0) {
     [IO.File]::AppendAllText($logPath,
         "$(Get-Date -Format o) llama-server could not enumerate compute devices`r`n")
@@ -77,7 +88,50 @@ if ([string]::IsNullOrWhiteSpace($device)) {
 $arguments.Add('--device')
 $arguments.Add($device)
 
+# A new server's first request took about 7 s on an RTX 4090, against about 1 s
+# after: past cleanup's 5 s local timeout, so that dictation came back raw.
+# Once it answers, two fixed sentences go through the real cleanup path, local only,
+# which also caches the prompt every cleanup shares. They never reach the history.
+$warmUp = [PowerShell]::Create().AddScript({
+    param([string]$Endpoint, [string]$Alias, [string]$Cleanup, [string]$Shell)
+    $deadline = [DateTime]::UtcNow.AddMinutes(2)
+    $ready = $false
+    while (-not $ready -and [DateTime]::UtcNow -lt $deadline) {
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri ($Endpoint.TrimEnd('/') + '/health') `
+                -TimeoutSec 1 -ErrorAction Stop | Out-Null
+            $ready = $true
+        } catch { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $ready) { return }
+    foreach ($sentence in @('um so can you uh check the status of the build',
+            'okay so the tests are passing now right')) {
+        $start = [Diagnostics.ProcessStartInfo]::new($Shell,
+            "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Cleanup`"")
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardInput = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.EnvironmentVariables['VOXTYPE_CLEANUP_BACKEND'] = 'local'
+        $start.EnvironmentVariables['VOXTYPE_CLEANUP_ENDPOINT'] = $Endpoint
+        $start.EnvironmentVariables['VOXTYPE_CLEANUP_LOCAL_MODEL'] = $Alias
+        $start.EnvironmentVariables['VOXTYPE_CLEANUP_TIMEOUT'] = '60'
+        $start.EnvironmentVariables['VOXTYPE_HISTORY_DISABLED'] = '1'
+        $child = [Diagnostics.Process]::Start($start)
+        $errors = $child.StandardError.ReadToEndAsync()
+        $child.StandardInput.Write($sentence)
+        $child.StandardInput.Close()
+        $null = $child.StandardOutput.ReadToEnd()
+        $null = $errors.Result
+        $child.WaitForExit()
+    }
+})
+$null = $warmUp.AddArgument($endpoint).AddArgument($modelAlias).AddArgument(
+    (Join-Path $PSScriptRoot 'voxtype-cleanup.ps1')).AddArgument((Get-Process -Id $PID).Path)
+$null = $warmUp.BeginInvoke()
+
 # The package's hidden launcher owns this process. A stopped server stays stopped;
 # the startup task tries once on the next logon and dictation safely passes through.
-& $server @arguments *>> $logPath
+& $server @arguments 2>&1 | ForEach-Object { [IO.File]::AppendAllText($logPath, "$_`r`n") }
 exit $LASTEXITCODE

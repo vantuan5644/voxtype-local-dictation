@@ -74,12 +74,28 @@ $manifest = [ordered]@{
         sha256 = (Get-FileHash $publishedPackage -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     models = @($dependencies.models | ForEach-Object {
-        [ordered]@{
-            id = [string]$_.id
-            fileName = [string]$_.fileName
-            sourceRevision = [string]$_.sourceRevision
-            url = [string]$_.url
-            sha256 = [string]$_.sha256
+        if ($null -ne $_.PSObject.Properties['files']) {
+            # A model of several files (Parakeet), kept in its own folder.
+            [ordered]@{
+                id = [string]$_.id
+                directory = [string]$_.directory
+                sourceRevision = [string]$_.sourceRevision
+                files = @($_.files | ForEach-Object {
+                    [ordered]@{
+                        fileName = [string]$_.fileName
+                        url = [string]$_.url
+                        sha256 = [string]$_.sha256
+                    }
+                })
+            }
+        } else {
+            [ordered]@{
+                id = [string]$_.id
+                fileName = [string]$_.fileName
+                sourceRevision = [string]$_.sourceRevision
+                url = [string]$_.url
+                sha256 = [string]$_.sha256
+            }
         }
     })
 }

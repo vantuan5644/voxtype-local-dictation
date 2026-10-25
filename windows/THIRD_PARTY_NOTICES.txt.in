@@ -10,7 +10,25 @@ llama.cpp
 Copyright its contributors. Licensed under the MIT License.
 Source: https://github.com/ggml-org/llama.cpp
 
-whisper.cpp model files
+ONNX Runtime, built into voxtype.exe
+Copyright Microsoft Corporation. Licensed under the MIT License.
+Source: https://github.com/microsoft/onnxruntime
+
+DirectML (DirectML.dll)
+Copyright Microsoft Corporation. Redistributed under the Microsoft Software
+License Terms for DirectX Machine Learning (LICENSES/DirectML-LICENSE.txt),
+with its own notices in LICENSES/DirectML-ThirdPartyNotices.txt.
+Source: https://www.nuget.org/packages/Microsoft.AI.DirectML/1.15.4
+
+Parakeet Ultra, the speech model setup downloads for recordings
+Parakeet Ultra by Moondream (https://huggingface.co/moondream/parakeet-ultra),
+a post-training of NVIDIA's Parakeet TDT 0.6B v3, converted to ONNX by Masterx.
+Licensed under Creative Commons Attribution 4.0 International (CC-BY-4.0).
+Source: https://huggingface.co/Masterx/parakeet-tdt-0.6b-ultra-onnx
+Changes: none to the weights; the fp16 files are saved as encoder-model.onnx
+and decoder_joint-model.onnx, the names VoxType loads.
+
+whisper.cpp model files, the speech model setup downloads for dictation
 Copyright its contributors. Licensed under the MIT License.
 Source: https://huggingface.co/ggerganov/whisper.cpp
 
@@ -21,5 +39,5 @@ Source: https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF
 Exact source revisions and file digests are recorded in payload-manifest.json
 and dependencies.lock.json in each release.
 
-Complete MIT and Apache License 2.0 texts are included in the LICENSES
-directory.
+Complete MIT, Apache License 2.0, CC-BY-4.0 and DirectML licence texts are
+included in the LICENSES directory.
