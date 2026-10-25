@@ -39,6 +39,8 @@ internal sealed class ConfigureForm : Form
     private readonly TextBox offlineDirectory = new TextBox();
     private readonly Button browse = new Button();
     private readonly CheckBox startup = new CheckBox();
+    private readonly CheckBox parakeet = new CheckBox();
+    private bool parakeetOptional;
     private readonly Label hardware = new Label();
     private readonly Label status = new Label();
     private readonly ProgressBar progress = new ProgressBar();
@@ -47,6 +49,15 @@ internal sealed class ConfigureForm : Form
     private readonly Label summary = new Label();
     private readonly ComboBox cleanup = new ComboBox();
     private List<ModelEntry> catalog;
+
+    // The speech models a catalog pins, by id, and the voxtype-setup.ps1 flag that sets each.
+    // Windows pins both, Whisper for dictation and Parakeet for transcribing recordings;
+    // older catalogs pin one, which then does both.
+    private static readonly Dictionary<string, string> SpeechFlags = new Dictionary<string, string>
+    {
+        { "parakeet", "-ParakeetModelPath" },
+        { "whisper", "-WhisperModelPath" }
+    };
 
     // The cleanup choices offered here, as chains for voxtype-setup.ps1 -CleanupBackend.
     private static readonly string[] CleanupChains = { "local", "pi", "pi,local" };
@@ -63,8 +74,8 @@ internal sealed class ConfigureForm : Form
         dataDirectory = Path.Combine(Environment.GetFolderPath(
             Environment.SpecialFolder.LocalApplicationData), "VoxType");
         Text = "Set up VoxType";
-        ClientSize = new Size(700, 635);
-        MinimumSize = new Size(716, 674);
+        ClientSize = new Size(700, 665);
+        MinimumSize = new Size(716, 704);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
 
@@ -124,26 +135,41 @@ internal sealed class ConfigureForm : Form
         browse.Enabled = false;
         browse.Click += ChooseOfflineDirectory;
         Controls.Add(browse);
+        // Dictation runs on Whisper, so Parakeet's download is offered and never assumed.
+        parakeet.SetBounds(30, 445, 636, 28);
+        parakeet.Visible = false;
+        parakeet.CheckedChanged += delegate { UpdateSummary(); };
+        Controls.Add(parakeet);
 
-        startup.SetBounds(30, 455, 620, 28);
+        startup.SetBounds(30, 485, 620, 28);
         startup.Text = "Start VoxType when I sign in";
         startup.Checked = true;
         Controls.Add(startup);
 
-        progress.SetBounds(30, 500, 636, 20);
+        progress.SetBounds(30, 530, 636, 20);
         progress.Style = ProgressBarStyle.Continuous;
         Controls.Add(progress);
-        status.SetBounds(30, 527, 636, 38);
+        status.SetBounds(30, 557, 636, 38);
         status.Text = "Choose a microphone and push-to-talk key.";
         Controls.Add(status);
 
-        install.SetBounds(516, 576, 150, 36);
+        install.SetBounds(516, 606, 150, 36);
         install.Text = "Install models";
         install.Click += InstallClicked;
         Controls.Add(install);
 
         try { catalog = LoadModels(); }
         catch (Exception) { catalog = null; }
+        var parakeetModel = OptionalParakeet(catalog);
+        if (parakeetModel != null)
+        {
+            parakeetOptional = true;
+            parakeet.Text = "Also download Parakeet Ultra, for transcribing recordings (" +
+                ResumableDownload.FormatBytes(parakeetModel.Size) + ")";
+            parakeet.Visible = true;
+            // Ticked when it is already here, so running setup again keeps it.
+            parakeet.Checked = ModelPresent(parakeetModel);
+        }
         // A fresh install starts on local cleanup, the same chain VoxType uses when no
         // choice is recorded; a recorded choice that is offered here is kept.
         var recorded = Array.IndexOf(CleanupChains, CleanupBackend.ReadRecorded(dataDirectory));
@@ -162,9 +188,39 @@ internal sealed class ConfigureForm : Form
         return CleanupChains[Math.Max(0, cleanup.SelectedIndex)];
     }
 
-    private static bool ModelNeeded(ModelEntry model, string chain)
+    private bool ModelNeeded(ModelEntry model, string chain)
     {
-        return model.Id != "cleanup" || CleanupBackend.ContainsLocal(chain);
+        return ModelNeeded(model.Id, chain, parakeetOptional, parakeet.Checked);
+    }
+
+    // Which pinned models setup fetches: Qwen only for a chain that uses local cleanup, and
+    // Parakeet only when asked for, unless it is the catalog's one speech model.
+    internal static bool ModelNeeded(string id, string chain, bool parakeetOptional, bool parakeetChosen)
+    {
+        if (id == "cleanup") return CleanupBackend.ContainsLocal(chain);
+        if (id == "parakeet" && parakeetOptional) return parakeetChosen;
+        return true;
+    }
+
+    // Parakeet is optional where the catalog also pins Whisper for dictation.
+    private static ModelEntry OptionalParakeet(List<ModelEntry> models)
+    {
+        if (models == null || !models.Exists(delegate(ModelEntry m) { return m.Id == "whisper"; }))
+            return null;
+        return models.Find(delegate(ModelEntry m) { return m.Id == "parakeet"; });
+    }
+
+    // A model already on this PC by its files' names and sizes; setup still checks digests.
+    private bool ModelPresent(ModelEntry model)
+    {
+        var folder = Path.Combine(dataDirectory, "models");
+        if (model.Folder != null) folder = Path.Combine(folder, model.Folder);
+        foreach (var file in model.Files)
+        {
+            var info = new FileInfo(Path.Combine(folder, file.FileName));
+            if (!info.Exists || info.Length != file.Size) return false;
+        }
+        return true;
     }
 
     // The header says where text goes for the chosen cleanup and how much disk the
@@ -362,25 +418,36 @@ internal sealed class ConfigureForm : Form
             var models = new List<ModelEntry>();
             foreach (var entry in LoadModels())
                 if (ModelNeeded(entry, chain)) models.Add(entry);
-            string whisperPath = null;
+            var speechModels = new List<KeyValuePair<string, string>>();
             string cleanupPath = null;
             for (var index = 0; index < models.Count; index++)
             {
                 var model = models[index];
                 SetStatus("Preparing " + model.Name + "...");
                 progress.Value = (index * 70) / models.Count;
-                var destination = Path.Combine(modelDirectory, model.FileName);
-                if (offlineModels.Checked)
+                // A model of several files (Parakeet) keeps them in its own folder.
+                var target = model.Folder == null ? modelDirectory :
+                    Path.Combine(modelDirectory, model.Folder);
+                Directory.CreateDirectory(target);
+                long before = 0;
+                foreach (var file in model.Files)
                 {
-                    var source = FindOfflineFile(offlineDirectory.Text, model.FileName);
-                    await Task.Run(delegate { CopyAndVerify(source, destination, model.Sha256); });
+                    var destination = Path.Combine(target, file.FileName);
+                    if (offlineModels.Checked)
+                    {
+                        var source = FindOfflineFile(offlineDirectory.Text, model.Folder, file.FileName);
+                        await Task.Run(delegate { CopyAndVerify(source, destination, file.Sha256); });
+                    }
+                    else
+                    {
+                        await DownloadAndVerify(model, file, destination, before, index, models.Count);
+                    }
+                    before += file.Size;
                 }
-                else
-                {
-                    await DownloadAndVerify(model, destination, index, models.Count);
-                }
-                if (model.Id == "whisper") whisperPath = destination;
-                if (model.Id == "cleanup") cleanupPath = destination;
+                var path = model.Folder == null ? Path.Combine(target, model.Files[0].FileName) : target;
+                if (SpeechFlags.ContainsKey(model.Id))
+                    speechModels.Add(new KeyValuePair<string, string>(SpeechFlags[model.Id], path));
+                if (model.Id == "cleanup") cleanupPath = path;
             }
             progress.Value = 75;
             SetStatus("Applying VoxType settings...");
@@ -388,7 +455,7 @@ internal sealed class ConfigureForm : Form
             var enableStartup = startup.Checked;
             await Task.Run(delegate
             {
-                ApplySettings((string)hotkey.Tag, selectedMicrophone, whisperPath,
+                ApplySettings((string)hotkey.Tag, selectedMicrophone, speechModels,
                     cleanupPath, enableStartup, chain);
             });
             progress.Value = 90;
@@ -430,22 +497,64 @@ internal sealed class ConfigureForm : Form
         var values = root["models"] as object[];
         if (values == null) throw new InvalidDataException("Dependency model list is invalid.");
         var result = new List<ModelEntry>();
+        var speech = 0;
+        var cleanups = 0;
         foreach (var value in values)
         {
             var item = value as Dictionary<string, object>;
             if (item == null) continue;
-            result.Add(new ModelEntry
+            var entry = new ModelEntry
             {
                 Id = RequiredString(item, "id"),
                 Name = RequiredString(item, "name"),
-                FileName = RequiredString(item, "fileName"),
-                Url = RequiredString(item, "url"),
-                Sha256 = RequiredString(item, "sha256"),
-                Size = OptionalSize(item)
-            });
+                Files = new List<ModelFile>()
+            };
+            // A model of several files lists them under files, kept in its own folder;
+            // a model of one file is that file.
+            object listed;
+            if (item.TryGetValue("files", out listed))
+            {
+                entry.Folder = RequiredString(item, "directory");
+                if (entry.Folder.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                        entry.Folder.Trim('.').Length == 0)
+                    throw new InvalidDataException("Dependency model folder is invalid.");
+                var files = listed as object[];
+                if (files == null || files.Length == 0)
+                    throw new InvalidDataException("Dependency model file list is invalid.");
+                foreach (var file in files)
+                {
+                    var fields = file as Dictionary<string, object>;
+                    if (fields == null) throw new InvalidDataException("Dependency model file is invalid.");
+                    entry.Files.Add(NewModelFile(fields));
+                }
+            }
+            else
+            {
+                entry.Files.Add(NewModelFile(item));
+            }
+            foreach (var file in entry.Files)
+            {
+                if (file.Size <= 0) { entry.Size = 0; break; }
+                entry.Size += file.Size;
+            }
+            if (SpeechFlags.ContainsKey(entry.Id)) speech++;
+            if (entry.Id == "cleanup") cleanups++;
+            result.Add(entry);
         }
-        if (result.Count != 2) throw new InvalidDataException("Expected two pinned models.");
+        if (speech < 1 || speech > SpeechFlags.Count || cleanups != 1 || result.Count != speech + cleanups)
+            throw new InvalidDataException("Expected the cleanup model and one or two speech models.");
         return result;
+    }
+
+    private static ModelFile NewModelFile(Dictionary<string, object> fields)
+    {
+        return new ModelFile
+        {
+            FileName = RequiredString(fields, "fileName"),
+            Url = RequiredString(fields, "url"),
+            Sha256 = RequiredString(fields, "sha256"),
+            Size = OptionalSize(fields)
+        };
     }
 
     private static string RequiredString(Dictionary<string, object> values, string key)
@@ -472,27 +581,31 @@ internal sealed class ConfigureForm : Form
     // Downloads run on a worker thread through ResumableDownload, which resumes .partial
     // files, recovers a partial that is already complete, restarts stalled connections and
     // renames only after the pinned SHA-256 matches.
-    private async Task DownloadAndVerify(ModelEntry model, string destination, int index, int count)
+    // A model of several files shows one progress over all of them: `before` is what
+    // its earlier files took.
+    private async Task DownloadAndVerify(ModelEntry model, ModelFile file, string destination,
+        long before, int index, int count)
     {
         if (File.Exists(destination))
         {
             try
             {
                 SetStatus("Checking " + model.Name + " (SHA-256)...");
-                await Task.Run(delegate { VerifyHash(destination, model.Sha256); });
+                await Task.Run(delegate { VerifyHash(destination, file.Sha256); });
                 return;
             }
             catch (InvalidDataException) { File.Delete(destination); }
         }
         var download = new ResumableDownload
         {
-            Url = model.Url,
+            Url = file.Url,
             Destination = destination,
-            Sha256 = model.Sha256,
-            ExpectedSize = model.Size,
+            Sha256 = file.Sha256,
+            ExpectedSize = file.Size,
             UserAgent = "VoxType-Windows-Setup/1.0",
             Progress = delegate(DownloadPhase phase, long received, long total)
             {
+                if (model.Size > 0) { received += before; total = model.Size; }
                 ShowDownloadProgress(model.Name, phase, received, total, index, count);
             }
         };
@@ -532,13 +645,15 @@ internal sealed class ConfigureForm : Form
         catch (InvalidOperationException) { }
     }
 
-    private static string FindOfflineFile(string root, string name)
+    // A file of a model with its own folder is looked for in that folder.
+    private static string FindOfflineFile(string root, string folder, string name)
     {
-        var direct = Path.Combine(root, name);
+        var relative = folder == null ? name : Path.Combine(folder, name);
+        var direct = Path.Combine(root, relative);
         if (File.Exists(direct)) return direct;
-        var models = Path.Combine(root, "models", name);
+        var models = Path.Combine(root, "models", relative);
         if (File.Exists(models)) return models;
-        throw new FileNotFoundException("Offline release is missing " + name + ".");
+        throw new FileNotFoundException("Offline release is missing " + relative + ".");
     }
 
     private static void CopyAndVerify(string source, string destination, string expectedHash)
@@ -557,14 +672,15 @@ internal sealed class ConfigureForm : Form
             throw new InvalidDataException(Path.GetFileName(path) + " failed its SHA-256 check.");
     }
 
-    private void ApplySettings(string key, string microphone, string whisper,
+    private void ApplySettings(string key, string microphone, List<KeyValuePair<string, string>> speechModels,
         string cleanupModel, bool enableStartup, string chain)
     {
         var script = Path.Combine(baseDirectory, "windows", "voxtype-setup.ps1");
         var arguments = new StringBuilder();
         arguments.Append("-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ");
         arguments.Append(Quote(script)).Append(" -Hotkey ").Append(Quote(key));
-        arguments.Append(" -WhisperModelPath ").Append(Quote(whisper));
+        foreach (var speech in speechModels)
+            arguments.Append(" ").Append(speech.Key).Append(" ").Append(Quote(speech.Value));
         if (!String.IsNullOrEmpty(cleanupModel))
             arguments.Append(" -CleanupModelPath ").Append(Quote(cleanupModel));
         arguments.Append(" -CleanupBackend ").Append(Quote(chain));
@@ -673,6 +789,7 @@ internal sealed class ConfigureForm : Form
         cleanup.Enabled = !busy;
         hotkey.Enabled = !busy;
         startup.Enabled = !busy;
+        parakeet.Enabled = !busy;
         browse.Enabled = !busy && offlineModels.Checked;
         offlineDirectory.Enabled = !busy && offlineModels.Checked;
         UseWaitCursor = busy;
@@ -692,6 +809,13 @@ internal sealed class ConfigureForm : Form
     {
         public string Id;
         public string Name;
+        public string Folder;
+        public List<ModelFile> Files;
+        public long Size;
+    }
+
+    private sealed class ModelFile
+    {
         public string FileName;
         public string Url;
         public string Sha256;

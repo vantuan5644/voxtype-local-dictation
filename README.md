@@ -132,7 +132,7 @@ machine.
 | | macOS | Linux (Hyprland/Omarchy) | Windows 11 |
 |---|---|---|---|
 | Push-to-talk key | `fn` (Globe) | Right Alt | chosen during setup |
-| Transcription | whisper on Metal | whisper on Vulkan/CUDA | upstream Windows build on Vulkan |
+| Transcription | whisper on Metal | whisper on Vulkan/CUDA | dictation: whisper on Vulkan; recordings (`voxtype transcribe --engine parakeet`): Parakeet Ultra (ONNX) on DirectML, else the CPU, an optional download; each switchable |
 | Cleanup model | llama.cpp LaunchAgent, port 8088 | llama.cpp systemd user unit, port 8088 | hosted through Pi, or packaged llama.cpp startup app on port 8088 (chosen during setup) |
 | Recording feedback | standalone OSD renderer (Swift) | the OSD voxtype spawns itself | native notifications in v1 |
 | Meeting mode | CoreAudio process tap | PipeWire monitor source | deferred |

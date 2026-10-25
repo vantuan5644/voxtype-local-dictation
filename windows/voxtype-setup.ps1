@@ -3,6 +3,12 @@ param(
     [string]$Hotkey,
     [string]$CleanupModelPath,
     [string]$WhisperModelPath,
+    # The Parakeet model folder.
+    [string]$ParakeetModelPath,
+    # The engine dictation uses. Without it: the engine of the one model given, or Whisper
+    # when both are, since with its prompt it spells more of the user's terms.
+    [ValidateSet('whisper', 'parakeet')]
+    [string]$Engine,
     [string]$AudioDevice,
     [switch]$EnableStartup,
     [switch]$DisableStartup,
@@ -37,6 +43,9 @@ if ([string]::IsNullOrWhiteSpace($CleanupModelPath)) { $CleanupModelPath = $defa
 if ($EnableStartup -and $DisableStartup) {
     throw '-EnableStartup and -DisableStartup cannot be used together'
 }
+$dictationEngine = if ($Engine) { $Engine.ToLowerInvariant() } elseif ($WhisperModelPath) {
+    'whisper'
+} elseif ($ParakeetModelPath) { 'parakeet' } else { $null }
 
 function Invoke-Step {
     param([string]$Description, [scriptblock]$Action)
@@ -114,7 +123,10 @@ if ($null -eq $voxtypePath) {
         'output.post_process.command' = 'voxtype-local.exe cleanup'
     }
     if ($Hotkey) { $settings['hotkey.key'] = $Hotkey.ToUpperInvariant() }
+    # The models are set before the engine that loads one of them.
     if ($WhisperModelPath) { $settings['whisper.model'] = $WhisperModelPath }
+    if ($ParakeetModelPath) { $settings['parakeet.model'] = $ParakeetModelPath }
+    if ($dictationEngine) { $settings['engine'] = $dictationEngine }
     if ($AudioDevice) { $settings['audio.device'] = $AudioDevice }
     foreach ($entry in $settings.GetEnumerator()) {
         $current = & $voxtypePath config get $entry.Key 2>$null
@@ -174,8 +186,8 @@ if ($null -ne $effectiveBackend -and (Test-CleanupChainHasLocal $effectiveBacken
     Write-Host 'returns the original transcript unchanged.'
 }
 
-if (-not $WhisperModelPath) {
-    Write-Host 'Select/download a Whisper model through `voxtype configure`.'
+if (-not $WhisperModelPath -and -not $ParakeetModelPath) {
+    Write-Host 'Select/download a speech model through `voxtype configure`.'
 }
 if (-not $SetupVad) { Write-Host 'Run `voxtype setup vad` to install voice activity detection.' }
 Write-Host 'Startup can also be managed under Task Manager > Startup apps.'

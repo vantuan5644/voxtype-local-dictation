@@ -112,9 +112,15 @@ user's words, so a down/slow/rejecting backend degrades to the raw transcript
 curl -sf http://127.0.0.1:8088/health          # the server itself
 systemctl --user status llama-server           # Linux
 tail ~/Library/Logs/voxtype-llama-server.log   # macOS
+Get-Content $env:LOCALAPPDATA\VoxType\logs\llama-server.log -Tail 20   # Windows
 VOXTYPE_CLEANUP_MIN_WORDS=1 VOXTYPE_CLEANUP_TIMEOUT=30 bash -c \
   'printf "so um like test" | voxtype-cleanup'
 ```
+
+On Windows, `llama-server could not start: ... Access is denied` in that log
+means the package does not declare that exe as an `Application` in its
+manifest: Windows starts no other exe from an installed package, even for the
+package's own processes.
 
 On Linux, a `llama-server` that lists GPU devices but refuses every model
 with `make_cpu_buft_list: no CPU backend found` is the

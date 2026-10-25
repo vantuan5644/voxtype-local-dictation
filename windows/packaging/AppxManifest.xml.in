@@ -28,6 +28,10 @@
   <Resources>
     <Resource Language="en-us" />
   </Resources>
+  <!-- Windows starts only the executables an Application below names. Any other exe in
+       the package is refused with "Access is denied" (win32 error 5), even when a process
+       of this package starts it, so every exe the package runs has an entry here, hidden
+       from Start. build-msix.ps1 refuses to pack an exe that has none. -->
   <Applications>
     <Application Id="VoxType" Executable="voxtype.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements DisplayName="VoxType" Description="Local push-to-talk dictation"
@@ -74,6 +78,34 @@
           </uap3:AppExecutionAlias>
         </uap3:Extension>
       </Extensions>
+    </Application>
+    <Application Id="VoxTypeStartup" Executable="voxtype-startup.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="VoxType startup"
+        Description="Starts VoxType when you sign in"
+        BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png"
+        Square150x150Logo="Assets\Square150x150Logo.png" AppListEntry="none" />
+    </Application>
+    <Application Id="VoxTypeCleanupServer" Executable="voxtype-cleanup-server.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="VoxType cleanup server"
+        Description="Starts the local cleanup model"
+        BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png"
+        Square150x150Logo="Assets\Square150x150Logo.png" AppListEntry="none" />
+    </Application>
+    <Application Id="VoxTypeLlamaServer" Executable="windows\bin\llama-server.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="VoxType local cleanup model"
+        Description="llama.cpp serving the local cleanup model"
+        BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png"
+        Square150x150Logo="Assets\Square150x150Logo.png" AppListEntry="none" />
+    </Application>
+    <Application Id="VoxTypeDeviceCheck" Executable="llama-server.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="VoxType GPU check"
+        Description="Lists the GPUs the local cleanup model can use"
+        BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png"
+        Square150x150Logo="Assets\Square150x150Logo.png" AppListEntry="none" />
     </Application>
   </Applications>
   <Capabilities>
