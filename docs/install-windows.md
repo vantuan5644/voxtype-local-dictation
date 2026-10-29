@@ -81,32 +81,43 @@ model reaches its final filename only after its exact digest passes.
 
 ### Cleanup choice
 
-The setup window offers three choices:
+The setup window offers five choices:
 
 | Choice | Chain | Text leaves the PC | Download |
 |---|---|---|---|
 | Local Qwen only, the default | `local` | no | 3.07 GB |
-| Pi (hosted; sends transcript text) | `pi` | yes, to Pi's hosted model | 574 MB |
+| OpenCode Go (hosted; sends transcript text) | `opencode` | yes, to OpenCode Go | 574 MB |
+| OpenCode Go, then local Qwen if it is unavailable | `opencode,local` | yes, unless OpenCode Go is unavailable | 3.07 GB |
+| Pi (hosted, through the pi command; sends transcript text) | `pi` | yes, to Pi's hosted model | 574 MB |
 | Pi, then local Qwen if Pi is unavailable | `pi,local` | yes, unless Pi is unavailable | 3.07 GB |
 
 Parakeet Ultra adds 1.28 GB to any of them when its box is ticked.
 
-The Pi choices need the `pi` CLI on `PATH`; until it is installed, that link is
-skipped. Setup records the choice for the current Windows account in
-`%LOCALAPPDATA%\VoxType\cleanup-backend`, a UTF-8 text file holding an ordered,
-comma-separated chain of `pi`, `local`, `openai`, `claude` and `codex`, or the
+The OpenCode Go choices call the same model as Pi directly over HTTPS, which
+saves Pi's start-up, about half a second a dictation. They need an OpenCode Go
+key: `VOXTYPE_CLEANUP_OPENCODE_KEY`, or else the one Pi saved when it was
+signed in to OpenCode Go (`%USERPROFILE%\.pi\agent\auth.json`, read in place);
+until there is one, that link is skipped and setup says so. The Pi choices need the `pi` CLI on `PATH`; until it is
+installed, that link is skipped. Setup records the choice for the current
+Windows account in `%LOCALAPPDATA%\VoxType\cleanup-backend`, a UTF-8 text file
+holding an ordered, comma-separated chain of `opencode`, `groq`, `pi`, `local`,
+`openai`, `claude` and `codex`, or the
 single value `off`. `local` may only be the last link, so a local server that is
 merely down never sends text to a hosted backend. Cleanup tries each link in
 turn; a link that is unavailable, times out, fails, or returns text that breaks a
 guard falls through to the next, and the last resort is the raw transcription.
 An invalid file also returns the raw transcription.
 
+`groq` is not offered in the window: it sends the text to Groq with your own key,
+`VOXTYPE_CLEANUP_GROQ_KEY`, or the file `VOXTYPE_CLEANUP_GROQ_KEY_FILE` names, read in
+place; until there is one, that link is skipped and setup says so.
+
 Precedence: `VOXTYPE_CLEANUP_BACKEND`, when set, then the file, then `local`
 (the behaviour of installs that predate the choice). Other tools can record a
 choice with the same parameter the window uses:
 
 ```powershell
-voxtype-local setup -CleanupBackend pi,local
+voxtype-local setup -CleanupBackend opencode,local
 voxtype-local setup -CleanupBackend local -DryRun   # show what would change
 ```
 

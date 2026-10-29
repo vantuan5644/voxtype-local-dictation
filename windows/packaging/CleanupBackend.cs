@@ -3,17 +3,17 @@ using System.Collections.Generic;
 using System.IO;
 
 // The cleanup choice as the launchers read it. windows\voxtype-cleanup-backend.ps1 holds the
-// same rules for the scripts: an ordered, comma-separated chain of pi, local, openai, claude
-// and codex, or the single value off; local only as the last link. Precedence is
+// same rules for the scripts: an ordered, comma-separated chain of opencode, anthropic, groq, pi,
+// local, openai, claude and codex, or the single value off; local only as the last link. Precedence is
 // VOXTYPE_CLEANUP_BACKEND, then <LocalAppData>\VoxType\cleanup-backend (written by
 // voxtype-setup.ps1 -CleanupBackend), then local.
 internal static class CleanupBackend
 {
     internal const string FileName = "cleanup-backend";
     internal const string DefaultChain = "local";
-    private static readonly string[] Names = { "pi", "local", "openai", "claude", "codex" };
+    private static readonly string[] Names = { "opencode", "anthropic", "groq", "pi", "local", "openai", "claude", "codex" };
 
-    // The canonical chain ("pi,local"), or null when the value breaks a rule.
+    // The canonical chain ("opencode,local"), or null when the value breaks a rule.
     internal static string Normalize(string value)
     {
         if (value == null || value.Trim().Length == 0) return null;
@@ -49,6 +49,21 @@ internal static class CleanupBackend
         var path = Path.Combine(dataDirectory, FileName);
         if (!File.Exists(path)) return DefaultChain;
         return ReadRecorded(dataDirectory);
+    }
+
+    // Whether voxtype-cleanup.ps1 finds an OpenCode Go key: VOXTYPE_CLEANUP_OPENCODE_KEY, or
+    // the one pi keeps in its auth.json, which is read in place and never copied.
+    internal static bool HasOpenCodeKey()
+    {
+        if (!String.IsNullOrEmpty(Environment.GetEnvironmentVariable("VOXTYPE_CLEANUP_OPENCODE_KEY")))
+            return true;
+        var agent = Environment.GetEnvironmentVariable("PI_CODING_AGENT_DIR");
+        if (String.IsNullOrEmpty(agent))
+            agent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pi", "agent");
+        var auth = Path.Combine(agent, "auth.json");
+        try { return File.Exists(auth) && File.ReadAllText(auth).Contains("\"opencode-go\""); }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 
     internal static bool ContainsLocal(string chain)

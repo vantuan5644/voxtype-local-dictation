@@ -1,7 +1,8 @@
 # Shared by voxtype-setup.ps1 and voxtype-cleanup.ps1, which dot-source it.
 #
-# The cleanup backend is an ordered, comma-separated chain of pi, local, openai,
-# claude and codex, or the single value off. Cleanup tries each link in turn;
+# The cleanup backend is an ordered, comma-separated chain of opencode, anthropic, groq, pi,
+# local, openai, claude and codex, or the single value off. anthropic is Claude through
+# Anthropic's own API on the user's key; claude is the Claude Code command. Cleanup tries each link in turn;
 # any failure falls through to the next link and finally to the raw
 # transcription. local may only be the last link: a local server that is merely
 # down must never hand the text to a hosted backend.
@@ -12,24 +13,24 @@
 # VOXTYPE_DATA_ROOT or %LOCALAPPDATA%\VoxType. packaging\CleanupBackend.cs
 # applies the same rules for the launchers.
 
-$CleanupBackendNames = @('pi', 'local', 'openai', 'claude', 'codex')
+$CleanupBackendNames = @('opencode', 'anthropic', 'groq', 'pi', 'local', 'openai', 'claude', 'codex')
 $CleanupBackendFileName = 'cleanup-backend'
 $CleanupBackendDefault = 'local'
 
-# Returns the canonical chain (lower case, no spaces, such as 'pi,local') or
+# Returns the canonical chain (lower case, no spaces, such as 'opencode,local') or
 # throws with the rule the value breaks.
 function ConvertTo-CleanupBackendChain {
     param([AllowNull()][AllowEmptyString()][string]$Value)
     $text = if ($null -eq $Value) { '' } else { $Value.Trim() }
     if ($text.Length -eq 0) {
-        throw 'the cleanup backend is empty; use off or a chain such as pi,local'
+        throw 'the cleanup backend is empty; use off or a chain such as opencode,local'
     }
     $links = [System.Collections.Generic.List[string]]::new()
     foreach ($part in $text.Split(',')) {
         $link = $part.Trim().ToLowerInvariant()
         if ($link.Length -eq 0) { throw "cleanup backend '$text' has an empty link" }
         if ($link -ne 'off' -and $CleanupBackendNames -notcontains $link) {
-            throw "unknown cleanup backend '$link' (use pi, local, openai, claude, codex, or off)"
+            throw "unknown cleanup backend '$link' (use opencode, anthropic, groq, pi, local, openai, claude, codex, or off)"
         }
         if ($links.Contains($link)) { throw "cleanup backend '$link' appears twice in '$text'" }
         $links.Add($link)
@@ -43,6 +44,57 @@ function ConvertTo-CleanupBackendChain {
             'a local failure must never send the text to a hosted backend'
     }
     return ($links.ToArray() -join ',')
+}
+
+# OpenCode Go's key: VOXTYPE_CLEANUP_OPENCODE_KEY, else the file
+# VOXTYPE_CLEANUP_OPENCODE_KEY_FILE names (an app that keeps the key, as for Groq), else the
+# one pi keeps in its auth.json, each read in place. Empty when there is none or it cannot be
+# read. Setup only asks whether there is one; the key is never printed.
+function Get-OpenCodeKey {
+    $key = [Environment]::GetEnvironmentVariable('VOXTYPE_CLEANUP_OPENCODE_KEY')
+    if (-not [string]::IsNullOrEmpty($key)) { return $key }
+    $file = [Environment]::GetEnvironmentVariable('VOXTYPE_CLEANUP_OPENCODE_KEY_FILE')
+    if (-not [string]::IsNullOrEmpty($file) -and (Test-Path -LiteralPath $file -PathType Leaf)) {
+        try {
+            $key = ([IO.File]::ReadAllText($file)).Trim()
+            if (-not [string]::IsNullOrEmpty($key)) { return $key }
+        } catch { }
+    }
+    $agent = [Environment]::GetEnvironmentVariable('PI_CODING_AGENT_DIR')
+    if ([string]::IsNullOrEmpty($agent)) {
+        $agent = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.pi\agent'
+    }
+    $path = Join-Path $agent 'auth.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
+    try {
+        $entry = ([IO.File]::ReadAllText($path) | ConvertFrom-Json).PSObject.Properties['opencode-go']
+        if ($null -eq $entry -or $null -eq $entry.Value.PSObject.Properties['key']) { return '' }
+        return [string]$entry.Value.key
+    } catch {
+        return ''
+    }
+}
+
+# Groq's key: VOXTYPE_CLEANUP_GROQ_KEY, else the file VOXTYPE_CLEANUP_GROQ_KEY_FILE names,
+# read in place each time, so an app that keeps the key can change it without a restart.
+# Empty when there is neither or that file cannot be read; the key is never printed.
+function Get-GroqKey {
+    $key = [Environment]::GetEnvironmentVariable('VOXTYPE_CLEANUP_GROQ_KEY')
+    if (-not [string]::IsNullOrEmpty($key)) { return $key.Trim() }
+    $path = [Environment]::GetEnvironmentVariable('VOXTYPE_CLEANUP_GROQ_KEY_FILE')
+    if ([string]::IsNullOrEmpty($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
+    try { return ([IO.File]::ReadAllText($path)).Trim() } catch { return '' }
+}
+
+# Anthropic's key, as Groq's: VOXTYPE_CLEANUP_ANTHROPIC_KEY, else the file
+# VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE names, read in place each time. Empty when there is
+# neither or that file cannot be read; the key is never printed.
+function Get-AnthropicKey {
+    $key = [Environment]::GetEnvironmentVariable('VOXTYPE_CLEANUP_ANTHROPIC_KEY')
+    if (-not [string]::IsNullOrEmpty($key)) { return $key.Trim() }
+    $path = [Environment]::GetEnvironmentVariable('VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE')
+    if ([string]::IsNullOrEmpty($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return '' }
+    try { return ([IO.File]::ReadAllText($path)).Trim() } catch { return '' }
 }
 
 function Get-CleanupDataRoot {
