@@ -16,6 +16,9 @@
 #                 want a name or file, not a glyph)
 #   -u <urgency>  low | normal | critical
 #   <title> [description]
+#   --exec <program> [args...]
+#                 run that when the notification is clicked; it comes last
+#                 and takes the rest of the line, one word per argument
 #
 # Degrades to silence and always exits 0 -- a notification must never fail a
 # dictation. That is the same contract the macOS shim (macos/voxtype-notify)
@@ -43,6 +46,7 @@ GLYPH=""
 URGENCY=""
 TITLE=""
 DESC=""
+EXEC=()
 
 while (( $# > 0 )); do
   case "$1" in
@@ -51,6 +55,7 @@ while (( $# > 0 )); do
     -t) EXPIRE="${2:-}"; shift ;;
     -g) GLYPH="${2:-}"; shift ;;
     -u) URGENCY="${2:-}"; shift ;;
+    --exec) shift; EXEC=("$@"); break ;;
     -h|--help) sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;   # also handled above
     -*) ;;                            # unknown flag: swallow, stay usable
     *)  if [[ -z $TITLE ]]; then TITLE="$1"; else DESC="$1"; fi ;;
@@ -88,6 +93,17 @@ esac
 # -t is passed through the same way (the callers always send one).
 if [[ -n $EXPIRE ]]; then
   args+=( -t "$EXPIRE" )
+fi
+
+# A click: notify-send can only wait for one, so the waiting happens in the
+# background, with every stream let go, and the caller gets no id. Without
+# --action (libnotify before 0.7.10) the notification is shown unclickable.
+if (( ${#EXEC[@]} )) && notify-send --help 2>&1 | grep -q -- '--action'; then
+  (
+    action="$(notify-send --wait --action=default=Open "${args[@]}" 2>/dev/null)" || exit 0
+    [[ $action == default ]] && exec "${EXEC[@]}"
+  ) </dev/null >/dev/null 2>&1 &
+  exit 0
 fi
 
 if (( CAN_ID && PRINT )); then

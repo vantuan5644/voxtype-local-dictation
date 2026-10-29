@@ -48,46 +48,120 @@ restart the daemon when a key actually changed.
 `voxtype-cleanup` reads raw transcription on stdin and writes cleaned text on
 stdout. **The one rule: never lose the user's words.** Every failure path
 prints the original text unchanged: backend down, timeout, non-zero exit, empty
-answer, an answer that grew, shrank, or dropped content words. Three
-structural guards enforce it after the model answers (length growth cap,
-length shrink floor, content-word survival), plus a token budget of ~2 tokens
-per spoken word before the call.
+answer, an answer that grew, shrank, dropped content words or added words.
+Four structural guards enforce it after the model answers (length growth cap,
+length shrink floor, content-word survival, no new words), plus a token budget
+of ~2 tokens per spoken word before the call.
+
+The prompt, its five worked examples, the request and every guard limit are
+data, in `cleanup.json`, which the Linux and Windows filters both read: the
+installers put it beside `vocabulary.conf`, and a run from a checkout reads the
+repo copy. `cleanup-cases.json` holds the answers the guards must give, and
+each filter's tests replay it (`linux/tests/test-cleanup.sh`,
+`windows/tests/test-windows.ps1`). Without the file, or without `jq` on Linux,
+every dictation is typed as said.
+
+An app that keeps a history of dictations can ask for each one: it writes
+`dictation-history.json`, `{"schema": 1, "inbox": "<absolute path>"}`, into
+voxtype's data directory (`%LOCALAPPDATA%\VoxType` on Windows,
+`~/.local/share/voxtype` on Linux, or `VOXTYPE_DATA_ROOT`). Both filters then
+drop every dictation there as one JSON file, `{schema, id, text, raw_text,
+created_at}`, written whole and renamed into place. Saving it never stops the
+typing; `VOXTYPE_HISTORY_DISABLED=1` turns it off.
 
 ### Backends
 
-`VOXTYPE_CLEANUP_BACKEND` selects one of five:
+`VOXTYPE_CLEANUP_BACKEND` selects one of these. Without it, the filter uses the first
+link of the chain recorded in `cleanup-backend` in the data root
+(`${VOXTYPE_DATA_ROOT:-${XDG_DATA_HOME:-~/.local/share}/voxtype}`), the file the Windows
+port reads too, and without that file `local`.
 
 | Backend | What it is | Latency character |
 |---|---|---|
 | `local` (default) | llama.cpp on `127.0.0.1:8088` holding Qwen3-4B resident | ~145 ms p50 on a desktop GPU, ~950 ms on an M1 Pro; the reason this design exists |
+| `opencode` | one HTTPS request to OpenCode Go's Messages API (`qwen3.8-flash`, thinking off) | ~1.5 s; hosted, so the text leaves the machine |
+| `groq` | one HTTPS request to Groq's chat API (`openai/gpt-oss-20b`, low reasoning effort) with your own key | hosted, so the text leaves the machine; for a machine with no model and no OpenCode Go account |
+| `anthropic` | one HTTPS request to Anthropic's Messages API (`claude-haiku-5-5`, thinking off, no temperature or top_p) with your own key | hosted, so the text leaves the machine; not the `claude` backend, which runs the Claude Code command |
+| `pi` | `pi -p` on the same model, or another of pi's providers | `opencode` plus pi's startup (~0.1 s on Windows, ~1.1 s on Linux) |
 | `claude` | `claude -p` (Haiku by default) | 5 to 30 s and high variance; explicit choice, never a fallback |
 | `codex` | `codex exec` one-shot | same; sandboxed read-only |
-| `openai` | any OpenAI-compatible endpoint | whatever the endpoint costs |
+| `openai` | OpenAI Responses (`gpt-6-luna` by default), storage disabled, with the shared cleanup prompt and guards | OpenAI API billing; text leaves the machine |
 | `off` | passthrough | ~0 ms |
 
 The fallback is **always the raw text**. Falling back from a 5 s local timeout
 to a 20 s cloud call would re-import the latency the local backend exists to
 remove.
+### When cleanup is down
+
+A backend that cannot clean at all (no key, a key the server refuses, no
+answer, an error, llama-server not running) leaves the text as said, which on
+its own looks exactly like a dictation with nothing to fix. So the filter also
+posts a notification, "Dictation cleanup is down", naming why: an expired or
+revoked key shows as `the key was refused (HTTP 401)`, an outage as its status.
+It is said once per reason per 15 minutes, each one replacing the last. A
+guard refusing an answer is not an outage and posts nothing.
+
+While `llama-server.service` is installed, clicking the notification runs
+`voxtype-cleanup --use-local`. That starts the unit, waits for it to answer
+(up to `VOXTYPE_CLEANUP_LOCAL_WAIT`, 120 s), and turns on a switch in the
+runtime directory (`$XDG_RUNTIME_DIR/voxtype-cleanup-local`). While the switch
+is on and the server answers, every dictation is cleaned locally whatever
+backend is chosen. `systemctl --user stop llama-server` ends it on the next
+dictation, and so does a logout. The unit is never enabled by this, so it is
+not running after a reboot.
+
+This is a switch you throw, not a fallback. A failed call never moves a
+dictation to another backend by itself, and the switch only ever points at
+this machine.
 
 ### Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `VOXTYPE_CLEANUP_BACKEND` | `local` | see table above |
-| `VOXTYPE_CLEANUP_ENDPOINT` | `http://127.0.0.1:8088` | base URL for `local`/`openai` |
+| `VOXTYPE_CLEANUP_ENDPOINT` | `http://127.0.0.1:8088` | base URL for `local` |
 | `VOXTYPE_CLEANUP_LOCAL_MODEL` | `qwen3-4b-instruct-2507` | the alias llama-server was started with |
 | `VOXTYPE_CLEANUP_MODEL` | `haiku` / `gpt-4o-mini` | cloud model name |
-| `VOXTYPE_CLEANUP_API_KEY` | — | bearer token for the `openai` backend |
+| `VOXTYPE_CLEANUP_API_KEY` | — | explicit bearer-token override for the `openai` backend |
+| `VOXTYPE_CLEANUP_OPENAI_KEY_FILE` | — | path to the OpenAI key saved by Libre; read in place, key never passed in arguments |
+| `VOXTYPE_CLEANUP_OPENAI_MODEL` | `gpt-6-luna` | OpenAI cleanup model; Libre also offers `gpt-6.1-sol` |
 | `VOXTYPE_CLEANUP_CODEX_PROFILE` | `luna` | codex profile |
-| `VOXTYPE_CLEANUP_MIN_WORDS` | 3 local / 6 cloud | below this, pass through untouched |
-| `VOXTYPE_CLEANUP_TIMEOUT` | 5 s local / 20 s cloud | per-call ceiling |
+| `VOXTYPE_CLEANUP_OPENCODE_KEY` | pi's `opencode-go` key | OpenCode Go key; else read in place from `${PI_CODING_AGENT_DIR:-~/.pi/agent}/auth.json` |
+| `VOXTYPE_CLEANUP_OPENCODE_MODEL` | `qwen3.8-flash` | OpenCode Go model; it must have a thinking off |
+| `VOXTYPE_CLEANUP_OPENCODE_ENDPOINT` | `https://opencode.ai/inference/go/anthropic/v1/messages` | its Messages URL |
+| `VOXTYPE_CLEANUP_GROQ_KEY` | — | Groq key (console.groq.com); else read from the file below |
+| `VOXTYPE_CLEANUP_GROQ_KEY_FILE` | — | a file holding the Groq key, read in place at each dictation, so an app that keeps the key can change it without restarting the daemon |
+| `VOXTYPE_CLEANUP_GROQ_MODEL` | `openai/gpt-oss-20b` | Groq model |
+| `VOXTYPE_CLEANUP_GROQ_ENDPOINT` | `https://api.groq.com/openai/v1/chat/completions` | its chat completions URL |
+| `VOXTYPE_CLEANUP_ANTHROPIC_KEY` | — | Anthropic key (platform.claude.com); else read from the file below |
+| `VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE` | — | a file holding the Anthropic key, read in place at each dictation, as for Groq |
+| `VOXTYPE_CLEANUP_ANTHROPIC_MODEL` | `claude-haiku-5-5` | Claude model |
+| `VOXTYPE_CLEANUP_ANTHROPIC_ENDPOINT` | `https://api.anthropic.com/v1/messages` | its Messages URL |
+| `VOXTYPE_DATA_ROOT` | `~/.local/share/voxtype` | where `cleanup-backend` is read without `VOXTYPE_CLEANUP_BACKEND` |
+| `VOXTYPE_CLEANUP_FILE` | found as above | the rules file, `cleanup.json` |
+| `VOXTYPE_CLEANUP_MIN_WORDS` | 3 local, opencode, anthropic, groq and pi / 6 the rest | below this, pass through untouched |
+| `VOXTYPE_CLEANUP_TIMEOUT` | 5 s local / 8 s opencode, anthropic, groq and pi / 20 s the rest | per-call ceiling |
 | `VOXTYPE_CLEANUP_MAX_GROWTH` | 3 | cleaned/raw length ratio that means the model editorialised |
-| `VOXTYPE_CLEANUP_MIN_SHRINK` | 55 % local / 45 % cloud | floor the cleaned text must keep |
+| `VOXTYPE_CLEANUP_MIN_SHRINK` | 55 % local / 45 % the rest | floor the cleaned text must keep |
 | `VOXTYPE_CLEANUP_KEEP_WORDS` | 70 | % of raw content words that must survive |
 | `VOXTYPE_CLEANUP_MAX_NEW_WORDS` | 0 | words the answer may have that the raw text did not |
 | `VOXTYPE_CLEANUP_NOTIFY_AFTER` | 1200 ms | progress toast appears only past this wait |
+| `VOXTYPE_CLEANUP_NOTIFIER` | `voxtype-notify` | the notifier; empty for none |
+| `VOXTYPE_CLEANUP_LOCAL_WAIT` | 120 s | how long `--use-local` waits for llama-server to answer |
 | `VOXTYPE_CLEANUP_CONTEXT` | — | extra context appended to the system prompt (see below) |
 | `VOXTYPE_CONTEXT_LOCAL_ONLY` | `1` | drop the context on cloud backends |
+| `VOXTYPE_CLEANUP_TIMING_FILE` | — | for a timed test: write when each step ended, which backend answered and why a text was kept, as JSON |
+
+A timed test's file is one JSON object: `schema` (1), `marks` (each step's
+`name` and the time it ended, `at`, in microseconds since 1970), `outcome`
+(`changed`, `unchanged`, `kept` or `short`), `why` (the reasons a text was
+kept), `link` (the backend whose answer was typed) and `server` (what the
+server reported: its token `usage`, llama.cpp's `timings`, and for `opencode`
+the `Cf-Placement` value as `served_from` when Cloudflare ran the request away
+from the edge that took it). The marks are `began`, `rules`, then for each
+backend tried `local:checked` (local's health check), `<backend>:answered` or
+`<backend>:failed`, and `<backend>:guarded`, then `done`; the Windows filter
+adds `<backend>:built` before each HTTP request.
 
 ### Meeting summaries
 
@@ -178,8 +252,8 @@ Use `voxtype-local vocab` in place of `voxtype-vocab`. Its `add`, `edit`,
 writes `[misheard]` directly with `voxtype config set whisper.initial_prompt`.
 
 The cleanup environment variables and defaults in this document apply on
-Windows, with two additions. `pi` is a sixth backend, and
-`VOXTYPE_CLEANUP_BACKEND` accepts an ordered chain such as `pi,local`: each
+Windows, with one addition: `VOXTYPE_CLEANUP_BACKEND` accepts an ordered chain such as
+`opencode,local`: each
 link is tried in turn, and any failure falls through to the next and finally
 to the raw text. `local` may only be the last link. When the variable is unset,
 cleanup reads the chain the setup window recorded in

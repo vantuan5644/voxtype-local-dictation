@@ -80,7 +80,11 @@ turns into *different* words go under `[misheard]` and become its
 purpose: an initial prompt is capped, and on near-silent audio whisper echoes
 it back as though you had said it. A guard warns past 40 terms. `voxtype-vocab
 add btrfs` adds the term and re-applies it; `voxtype-vocab edit` opens
-`$EDITOR` and applies only if something changed.
+`$EDITOR` and applies only if something changed. Where Libre Recording & Dictation
+keeps the vocabulary instead (its Settings > Vocabulary, synced with your other
+devices), it leaves `vocabulary.libre` beside the installed copy: the Linux
+installers then keep that copy rather than putting this file back, and
+`voxtype-vocab add` writes to it for Libre to pick up.
 
 ### Installers you can read before running them
 
@@ -122,7 +126,7 @@ During setup, Windows can download version-locked binaries and models after the
 user selects the online option. On macOS and Linux the running dictation path
 stays local unless you opt into a hosted `VOXTYPE_CLEANUP_BACKEND`. The Windows
 setup window asks instead, and its default is Local Qwen only, which keeps
-cleanup on the PC; the Pi choices send the transcript text to a hosted model. A failed
+cleanup on the PC; the OpenCode Go and Pi choices send the transcript text to a hosted model. A failed
 local cleanup returns the raw transcript instead of sending it elsewhere.
 Meeting summaries are the deliberate exception, and even they prefer the
 machine.
@@ -133,7 +137,7 @@ machine.
 |---|---|---|---|
 | Push-to-talk key | `fn` (Globe) | Right Alt | chosen during setup |
 | Transcription | whisper on Metal | whisper on Vulkan/CUDA | dictation: whisper on Vulkan; recordings (`voxtype transcribe --engine parakeet`): Parakeet Ultra (ONNX) on DirectML, else the CPU, an optional download; each switchable |
-| Cleanup model | llama.cpp LaunchAgent, port 8088 | llama.cpp systemd user unit, port 8088 | hosted through Pi, or packaged llama.cpp startup app on port 8088 (chosen during setup) |
+| Cleanup model | llama.cpp LaunchAgent, port 8088 | llama.cpp systemd user unit, port 8088 | hosted on OpenCode Go (directly, or through Pi), or packaged llama.cpp startup app on port 8088 (chosen during setup) |
 | Recording feedback | standalone OSD renderer (Swift) | the OSD voxtype spawns itself | native notifications in v1 |
 | Meeting mode | CoreAudio process tap | PipeWire monitor source | deferred |
 | Trigger extras | Raycast script commands | Hyprland bind + Omarchy menu row | MSIX execution aliases |
@@ -159,15 +163,15 @@ not enough (see [install-linux](docs/install-linux.md#the-llamacpp-trap));
 `jq`; `curl`; and membership of the `input` group for the evdev hotkey.
 
 On Windows: Windows 11 x64 build 22621 or newer, with about 0.6 GB of free
-storage for hosted cleanup through Pi or 3.1 GB with local Qwen. The signed
+storage for hosted cleanup or 3.1 GB with local Qwen. The signed
 installer carries the application binaries and the guided setup downloads or
 imports the models. The Windows v1 covers dictation and cleanup; meeting
 capture and OSD remain follow-up work.
 
 Local cleanup needs 4 to 6 GB of disk for the models on every platform. The
 Windows wizard downloads them after explicit confirmation or imports them from
-the offline bundle, and skips the 2.5 GB cleanup model when cleanup runs
-through Pi.
+the offline bundle, and skips the 2.5 GB cleanup model when cleanup is
+hosted.
 
 ## Quick start
 

@@ -35,6 +35,9 @@ baked into the generated unit at install time.
 
 3. llama.cpp with a CPU backend compiled in. See the trap below.
 
+4. `jq` and `curl`. The filter reads its rules with `jq`, and talks to the
+   local server with `curl`; without them every dictation is typed as said.
+
 ### The llama.cpp trap
 
 Every ggml backend is an *optional* dependency of the ggml package. On Arch,
@@ -59,8 +62,9 @@ Building from source: `-DGGML_NATIVE=on` plus your GPU backend covers it.
    runs the `VOXTYPE_CONTEXT` name check (see
    [troubleshooting](troubleshooting.md#voxtype_context-is-no-longer-yours)).
 2. Payload: `voxtype-cleanup`, `voxtype-meeting`, `voxtype-notify` and
-   `voxtype-vocab` into `~/.local/bin`, the shared `vocabulary.conf` into
-   `~/.config/voxtype/`, and Silero VAD via `voxtype setup vad` (885 KB, once).
+   `voxtype-vocab` into `~/.local/bin`, the shared `vocabulary.conf` and the
+   cleanup rules `cleanup.json` into `~/.config/voxtype/`, and Silero VAD via
+   `voxtype setup vad` (885 KB, once).
 3. The cleanup server: renders `llama-server.service.in` into
    `~/.config/systemd/user/llama-server.service` with the device, model, and
    an enumeration guard substituted, then `daemon-reload` + `enable --now`.

@@ -12,8 +12,8 @@
 # Phases:
 #   1. preflight -- voxtype itself, the input group, llama-server (and the
 #      optional-backend trap), the VOXTYPE_CONTEXT name check
-#   2. payload into ~/.local/bin + the vocabulary into ~/.config/voxtype,
-#      Silero VAD
+#   2. payload into ~/.local/bin + the vocabulary and the cleanup rules into
+#      ~/.config/voxtype, Silero VAD
 #   3. llama-server.service rendered from llama-server.service.in -- device,
 #      model, and the enumeration-order guard substituted at install time --
 #      then daemon-reload + enable
@@ -110,7 +110,7 @@ if (( UNINSTALL )); then
   run rm -f "$UNITS/$UNIT_NAME"
   runsh "systemctl --user daemon-reload" "systemctl --user daemon-reload"
   run rm -f "$BIN/voxtype-cleanup" "$BIN/voxtype-meeting" "$BIN/voxtype-notify" \
-           "$BIN/voxtype-vocab"
+           "$BIN/voxtype-vocab" "$CONF_DIR/cleanup.json"
   note "Kept: $CONF_DIR (voxtype's own config.toml and the vocabulary),"
   note "$MODELS and any downloaded weights (multi-GB; remove by hand)."
   note "Kept: voxtype itself and its service (this script never installed them)."
@@ -163,6 +163,15 @@ if (( HAVE_VOXTYPE )) &&
     warn "VOXTYPE_CONTEXT is exported but no longer read; rename it to VOXTYPE_CLEANUP_CONTEXT"
 fi
 
+# jq is how voxtype-cleanup reads its rules, cleanup.json. Not fatal, like a
+# missing llama-server: without it every dictation is typed as said.
+if command -v jq >/dev/null 2>&1; then
+  note "jq on PATH"
+else
+  warn "jq not installed; dictation cleanup will pass text through unchanged"
+  warn "  Arch: sudo pacman -S jq    Debian/Ubuntu: sudo apt install jq"
+fi
+
 HAVE_LLAMA=0
 if command -v llama-server >/dev/null 2>&1; then
   HAVE_LLAMA=1
@@ -195,7 +204,20 @@ run install -m 755 "$SRC/voxtype-notify" "$BIN/voxtype-notify"
 # prompt, which shells out to voxtype-vocab at dictation time. Neither list is
 # restated here -- add a term in vocabulary.conf and re-run.
 run install -m 755 "$ROOT/voxtype-vocab" "$BIN/voxtype-vocab"
-run install -m 644 "$ROOT/vocabulary.conf" "$CONF_DIR/vocabulary.conf"
+# Once Libre Recording & Dictation keeps the vocabulary (its Settings, or its
+# Sync with the user's other devices), it leaves vocabulary.libre beside the
+# installed copy. That copy is then the source, and putting the repo copy back
+# would undo what was added or removed on the other devices.
+if [[ -e $CONF_DIR/vocabulary.libre && -f $CONF_DIR/vocabulary.conf ]]; then
+  VOCAB_SOURCE="$CONF_DIR/vocabulary.conf"
+  note "keeping $CONF_DIR/vocabulary.conf: Libre keeps it"
+else
+  VOCAB_SOURCE="$ROOT/vocabulary.conf"
+  run install -m 644 "$VOCAB_SOURCE" "$CONF_DIR/vocabulary.conf"
+fi
+# The cleanup rules every port shares -- the prompt, its examples and the
+# guards' limits -- beside the vocabulary, where voxtype-cleanup looks last.
+run install -m 644 "$ROOT/cleanup.json" "$CONF_DIR/cleanup.json"
 # The two facts `voxtype-vocab add|edit|apply` needs and the read path never
 # does: which vocabulary.conf is the SOURCE (the repo copy -- editing the copy
 # installed just above is reverted by the next run), and how to apply it on this
@@ -205,7 +227,7 @@ runsh "record the vocabulary source + apply command in $CONF_DIR/vocab-source.co
   "printf '%s\n' \
      \"# Written by linux/install.sh. Read (never sourced) by voxtype-vocab's\" \
      '# write path -- see that script'\"'\"'s header. Regenerated on every run.' \
-     'VOXTYPE_VOCAB_SOURCE=$ROOT/vocabulary.conf' \
+     'VOXTYPE_VOCAB_SOURCE=$VOCAB_SOURCE' \
      'VOXTYPE_VOCAB_APPLY=$SRC/install.sh' \
      > '$CONF_DIR/vocab-source.conf' && chmod 644 '$CONF_DIR/vocab-source.conf'"
 
@@ -308,15 +330,17 @@ else
     # still a live modifier and stray ALT-bearing chords start recordings VAD
     # then discards -- without this each would also MPRIS-pause the player
     # and post two notifications. osd.enabled and vad.enabled stay ON: the
-    # OSD is the only feedback a real dictation is running. duck_media is
+    # OSD is the only feedback a real dictation is running (osd.enabled is
+    # left to VoxType's default, not asserted: an app with its own dictation
+    # display may turn it off while it runs). duck_media is
     # the replacement for the pause: it lowers other streams instead of
     # stopping them, so music does not bleed into the mic during a real
     # dictation and a stray chord costs a dip-and-recover.
     voxtype_changed=0
     # Built from [misheard] in vocabulary.conf, never restated here -- the
     # whole point of that file is that a term is typed once. Read from the
-    # REPO copy, so this does not silently depend on the install above
-    # having worked.
+    # source copy (the repo's, or the one Libre keeps), so this does not
+    # silently depend on the install above having worked.
     #
     # Only the MIS-HEARD half goes in. An initial_prompt is capped by
     # whisper.cpp and, on near-silent audio, whisper echoes it back as if it
@@ -324,7 +348,7 @@ else
     # Everything whisper hears correctly and merely mis-SPELLS is fixed
     # after the fact by the cleanup model, which has neither the cap nor
     # the echo risk. See docs/configuration.md.
-    VOXTYPE_MISHEARD="$(VOXTYPE_VOCAB_FILE="$ROOT/vocabulary.conf" \
+    VOXTYPE_MISHEARD="$(VOXTYPE_VOCAB_FILE="$VOCAB_SOURCE" \
                         "$ROOT/voxtype-vocab" misheard 2>/dev/null || true)"
     VOXTYPE_INITIAL_PROMPT="Technical dictation about software development and AI research. Vocabulary: $VOXTYPE_MISHEARD."
     # A guard, not the cap: whisper.cpp truncates silently, so a list this

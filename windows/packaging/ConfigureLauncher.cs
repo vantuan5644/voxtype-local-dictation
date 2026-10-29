@@ -60,11 +60,15 @@ internal sealed class ConfigureForm : Form
     };
 
     // The cleanup choices offered here, as chains for voxtype-setup.ps1 -CleanupBackend.
-    private static readonly string[] CleanupChains = { "local", "pi", "pi,local" };
+    // OpenCode Go is called directly; pi reaches the same model through its CLI, which adds
+    // its startup, and stays for a choice already recorded and pi's other providers.
+    private static readonly string[] CleanupChains = { "local", "opencode", "opencode,local", "pi", "pi,local" };
     private static readonly string[] CleanupLabels =
     {
         "Local Qwen only (2.5 GB download; text stays on this PC)",
-        "Pi (hosted; sends transcript text)",
+        "OpenCode Go (hosted; sends transcript text)",
+        "OpenCode Go, then local Qwen if it is unavailable",
+        "Pi (hosted, through the pi command; sends transcript text)",
         "Pi, then local Qwen if Pi is unavailable"
     };
 
@@ -228,21 +232,26 @@ internal sealed class ConfigureForm : Form
     private void UpdateSummary()
     {
         var chain = SelectedChain();
-        var hosted = chain.Split(',')[0] == "pi";
+        var first = chain.Split(',')[0];
+        var hosted = first == "opencode" || first == "pi";
+        var service = first == "pi" ? "through Pi" : "on OpenCode Go";
         var local = CleanupBackend.ContainsLocal(chain);
         string text;
         if (!hosted)
             text = "Speech and cleanup stay on this PC.";
         else if (local)
             text = "Speech is transcribed on this PC. Cleanup sends the transcript text over " +
-                "the internet to a hosted model through Pi; local Qwen cleans it only when Pi " +
-                "is unavailable.";
+                "the internet to a hosted model " + service + "; local Qwen cleans it only when " +
+                "that is unavailable.";
         else
             text = "Speech is transcribed on this PC. Cleanup sends the transcript text over " +
-                "the internet to a hosted model through Pi.";
-        if (hosted && !OnPath("pi"))
-            text += local ? " Pi is not installed yet, so local Qwen does the cleanup until it is." :
-                " Pi is not installed yet, so text is typed without cleanup until it is.";
+                "the internet to a hosted model " + service + ".";
+        var missing = first == "pi" && !OnPath("pi") ? "Pi is not installed yet" :
+            first == "opencode" && !CleanupBackend.HasOpenCodeKey() ?
+                "There is no OpenCode Go key yet (sign in with pi, or set VOXTYPE_CLEANUP_OPENCODE_KEY)" : null;
+        if (missing != null)
+            text += " " + missing + (local ? ", so local Qwen does the cleanup until then." :
+                ", so text is typed without cleanup until then.");
         var bytes = RequiredModelBytes(chain);
         if (bytes > 0)
             text += " The models need " + ResumableDownload.FormatBytes(bytes) + " of disk space.";

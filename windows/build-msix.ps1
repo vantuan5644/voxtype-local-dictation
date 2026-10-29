@@ -297,6 +297,9 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $voxtypeRoot 'vocabulary.conf') `
         -Destination (Join-Path $staging 'vocabulary.conf')
+    # The cleanup prompt and guards, one directory up from windows\voxtype-cleanup.ps1 as in the repo.
+    Copy-Item -LiteralPath (Join-Path $voxtypeRoot 'cleanup.json') `
+        -Destination (Join-Path $staging 'cleanup.json')
     Copy-Item -LiteralPath (Join-Path $windowsRoot 'licenses') `
         -Destination (Join-Path $staging 'LICENSES') -Recurse
 

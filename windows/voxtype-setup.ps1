@@ -175,6 +175,18 @@ if ($null -ne $effectiveBackend) {
             Write-Warning "$cli is not on PATH; cleanup skips that backend until it is installed."
         }
     }
+    if (@($effectiveBackend.Split(',')) -contains 'opencode' -and (Get-OpenCodeKey).Length -eq 0) {
+        Write-Warning ('No OpenCode Go key: set VOXTYPE_CLEANUP_OPENCODE_KEY or sign pi in to ' +
+            'OpenCode Go; cleanup skips that backend until then.')
+    }
+    if (@($effectiveBackend.Split(',')) -contains 'anthropic' -and (Get-AnthropicKey).Length -eq 0) {
+        Write-Warning ('No Anthropic key: set VOXTYPE_CLEANUP_ANTHROPIC_KEY, or ' +
+            'VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE to a file holding one; cleanup skips that backend until then.')
+    }
+    if (@($effectiveBackend.Split(',')) -contains 'groq' -and (Get-GroqKey).Length -eq 0) {
+        Write-Warning ('No Groq key: set VOXTYPE_CLEANUP_GROQ_KEY, or VOXTYPE_CLEANUP_GROQ_KEY_FILE ' +
+            'to a file holding one; cleanup skips that backend until then.')
+    }
 }
 if ($null -ne $effectiveBackend -and (Test-CleanupChainHasLocal $effectiveBackend) -and
     -not (Test-Path -LiteralPath $CleanupModelPath -PathType Leaf)) {

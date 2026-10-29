@@ -11,12 +11,15 @@ internal static class CleanupBackendTests
     {
         Environment.SetEnvironmentVariable("VOXTYPE_CLEANUP_BACKEND", null);
         Expect("single link", "pi", CleanupBackend.Normalize("pi"));
+        Expect("opencode link", "opencode,local", CleanupBackend.Normalize(" OpenCode , local "));
+        Expect("groq link", "groq,local", CleanupBackend.Normalize(" Groq , local "));
+        Expect("anthropic link", "anthropic,local", CleanupBackend.Normalize(" Anthropic , local "));
         Expect("case and spaces", "pi,local", CleanupBackend.Normalize(" Pi , LOCAL "));
         Expect("off alone", "off", CleanupBackend.Normalize("off"));
         Expect("long chain", "claude,codex,openai,local",
             CleanupBackend.Normalize("claude,codex,openai,local"));
         foreach (var invalid in new[] { null, "", "  ", "local,pi", "off,pi", "pi,off",
-                "pi,,local", "pi,pi", "bogus", "pi;local" })
+                "pi,,local", "pi,pi", "bogus", "pi;local", "local,opencode", "local,groq" })
             Expect("rejects <" + invalid + ">", null, CleanupBackend.Normalize(invalid));
 
         var root = Path.Combine(Path.GetTempPath(),
@@ -56,6 +59,18 @@ internal static class CleanupBackendTests
             ExpectTrue("no server when the environment says pi",
                 !CleanupBackend.WantsLocalServer(root));
             Environment.SetEnvironmentVariable("VOXTYPE_CLEANUP_BACKEND", null);
+
+            // Only whether cleanup will find an OpenCode Go key, never this machine's.
+            Environment.SetEnvironmentVariable("VOXTYPE_CLEANUP_OPENCODE_KEY", null);
+            Environment.SetEnvironmentVariable("PI_CODING_AGENT_DIR", root);
+            ExpectTrue("no OpenCode Go key without pi's store", !CleanupBackend.HasOpenCodeKey());
+            File.WriteAllText(Path.Combine(root, "auth.json"),
+                "{\"opencode-go\": {\"type\": \"api_key\", \"key\": \"test-key\"}}");
+            ExpectTrue("OpenCode Go key in pi's store", CleanupBackend.HasOpenCodeKey());
+            File.Delete(Path.Combine(root, "auth.json"));
+            Environment.SetEnvironmentVariable("VOXTYPE_CLEANUP_OPENCODE_KEY", "test-key");
+            ExpectTrue("OpenCode Go key in the environment", CleanupBackend.HasOpenCodeKey());
+            Environment.SetEnvironmentVariable("VOXTYPE_CLEANUP_OPENCODE_KEY", null);
         }
         finally
         {

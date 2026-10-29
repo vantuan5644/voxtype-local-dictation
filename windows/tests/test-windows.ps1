@@ -28,6 +28,12 @@ $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $env:VOXTYPE_DATA_ROOT = Join-Path ([IO.Path]::GetTempPath()) `
     ('voxtype-windows-data-' + [guid]::NewGuid().ToString('N'))
 Remove-Item Env:VOXTYPE_CLEANUP_BACKEND -ErrorAction SilentlyContinue
+# Nor may any test find this machine's OpenCode Go, Anthropic or Groq key and send a dictation away.
+Remove-Item Env:VOXTYPE_CLEANUP_OPENCODE_KEY, Env:VOXTYPE_CLEANUP_GROQ_KEY, `
+    Env:VOXTYPE_CLEANUP_GROQ_KEY_FILE, Env:VOXTYPE_CLEANUP_ANTHROPIC_KEY, `
+    Env:VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE -ErrorAction SilentlyContinue
+$env:PI_CODING_AGENT_DIR = Join-Path ([IO.Path]::GetTempPath()) `
+    ('voxtype-windows-pi-' + [guid]::NewGuid().ToString('N'))
 
 # Runs a compiled test program and records its output as a failure unless it exits 0.
 function Invoke-TestProgram {
@@ -58,12 +64,14 @@ function Invoke-Cleanup {
     param(
         [string]$Raw,
         [AllowEmptyString()][string]$Candidate,
-        [switch]$CallBackend
+        [switch]$CallBackend,
+        [string]$Link = ''
     )
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $shell
     $args = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $cleanup)
     if (-not $CallBackend) { $args += @('-ValidateCandidate', '-Candidate', $Candidate) }
+    if ($Link) { $args += @('-Link', $Link) }
     $start.Arguments = ($args | ForEach-Object { Quote-Argument $_ }) -join ' '
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
@@ -208,6 +216,7 @@ foreach ($requirement in @(
         @($msixBuilderText, 'packaging\ResumableDownload.cs', 'build-msix.ps1'),
         @($msixBuilderText, 'packaging\CleanupBackend.cs', 'build-msix.ps1'),
         @($msixBuilderText, "'voxtype-cleanup-backend.ps1'", 'build-msix.ps1'),
+        @($msixBuilderText, "'cleanup.json'", 'build-msix.ps1'),
         @($bootstrapBuilderText, 'packaging\ResumableDownload.cs', 'build-bootstrap.ps1'))) {
     if (-not $requirement[0].Contains($requirement[1])) {
         $failures.Add("$($requirement[2]) does not include $($requirement[1])")
@@ -216,39 +225,50 @@ foreach ($requirement in @(
 
 # Cleanup backend chain rules, shared by voxtype-setup.ps1 and voxtype-cleanup.ps1.
 . (Join-Path $windowsRoot 'voxtype-cleanup-backend.ps1')
-foreach ($case in @(@('pi', 'pi'), @(' Pi , LOCAL ', 'pi,local'), @('off', 'off'),
+foreach ($case in @(@('pi', 'pi'), @(' Pi , LOCAL ', 'pi,local'), @(' OpenCode , local ', 'opencode,local'),
+        @(' Groq , local ', 'groq,local'), @(' Anthropic , local ', 'anthropic,local'), @('off', 'off'),
         @('local', 'local'), @('claude,codex,openai,local', 'claude,codex,openai,local'))) {
     try {
         Assert-Equal "cleanup chain <$($case[0])>" $case[1] `
             (ConvertTo-CleanupBackendChain $case[0])
     } catch { $failures.Add("cleanup chain <$($case[0])> was rejected: $($_.Exception.Message)") }
 }
-foreach ($invalid in @('', '  ', 'local,pi', 'off,pi', 'pi,off', 'pi,,local', 'pi,pi', 'bogus')) {
+foreach ($invalid in @('', '  ', 'local,pi', 'off,pi', 'pi,off', 'pi,,local', 'pi,pi', 'bogus',
+        'local,opencode', 'opencode,opencode', 'local,groq')) {
     $accepted = $true
     try { ConvertTo-CleanupBackendChain $invalid | Out-Null } catch { $accepted = $false }
     if ($accepted) { $failures.Add("cleanup chain <$invalid> was accepted") }
 }
 
 function Start-FakeCleanupServer {
-    param([string]$ResponseText)
+    # RequestFile, when given, receives the body of the completion request. -Messages answers
+    # one Messages API request, as OpenCode Go does, with no health check first, and keeps its
+    # headers in RequestFile.headers. -Chat answers one chat request the same way, as Groq
+    # does, with reasoning beside the answer. Placement, when given, is sent as Cf-Placement.
+    param([string]$ResponseText, [string]$RequestFile = '', [switch]$Messages, [string]$Placement = '',
+        [switch]$Chat)
     $reservation = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     $reservation.Start()
     $port = ([Net.IPEndPoint]$reservation.LocalEndpoint).Port
     $reservation.Stop()
-    $job = Start-Job -ArgumentList $port, $ResponseText -ScriptBlock {
-        param($Port, $ResponseText)
+    $job = Start-Job -ArgumentList $port, $ResponseText, $RequestFile, ([bool]$Messages), $Placement,
+            ([bool]$Chat) -ScriptBlock {
+        param($Port, $ResponseText, $RequestFile, $Messages, $Placement, $Chat)
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
         $listener.Start()
         Write-Output 'ready'
         try {
-            for ($requestIndex = 0; $requestIndex -lt 2; $requestIndex++) {
+            $requests = if ($Messages -or $Chat) { 1 } else { 2 }
+            for ($requestIndex = 0; $requestIndex -lt $requests; $requestIndex++) {
                 $client = $listener.AcceptTcpClient()
                 try {
                     $stream = $client.GetStream()
                     $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false,
                         1024, $true)
                     $contentLength = 0
+                    $headerLines = [System.Collections.Generic.List[string]]::new()
                     while (($line = $reader.ReadLine()) -ne '') {
+                        $headerLines.Add($line)
                         if ($line -match '^Content-Length:\s*(\d+)$') {
                             $contentLength = [int]$Matches[1]
                         }
@@ -262,14 +282,34 @@ function Start-FakeCleanupServer {
                             $read += $count
                         }
                     }
-                    if ($requestIndex -eq 0) {
+                    $completion = $Messages -or $Chat -or $requestIndex -eq 1
+                    if ($completion -and $RequestFile -and $contentLength -gt 0) {
+                        [IO.File]::WriteAllText($RequestFile, [string]::new($buffer, 0, $read))
+                        if ($Messages -or $Chat) { [IO.File]::WriteAllLines($RequestFile + '.headers', $headerLines) }
+                    }
+                    $extra = ''
+                    if (-not $completion) {
                         $body = '{"status":"ok"}'
+                    } elseif ($Messages) {
+                        # A thinking block first, which is never the answer, and the usage.
+                        $body = @{ content = @(@{ type = 'thinking'; thinking = 'Not the answer.' },
+                                @{ type = 'text'; text = $ResponseText })
+                            usage = @{ input_tokens = 791; output_tokens = 18
+                                opencode = @{ tokens = @{ reasoning = 0 } } } } |
+                            ConvertTo-Json -Depth 6 -Compress
+                        if ($Placement) { $extra = "Cf-Placement: $Placement`r`n" }
+                    } elseif ($Chat) {
+                        $body = @{ choices = @(@{ message = @{ role = 'assistant'; content = $ResponseText
+                                    reasoning = 'Not the answer.' } })
+                            usage = @{ prompt_tokens = 802; completion_tokens = 41
+                                completion_tokens_details = @{ reasoning_tokens = 23 } } } |
+                            ConvertTo-Json -Depth 6 -Compress
                     } else {
                         $body = @{ choices = @(@{ message = @{ content = $ResponseText } }) } |
                             ConvertTo-Json -Depth 5 -Compress
                     }
                     $bytes = [Text.UTF8Encoding]::new($false).GetBytes($body)
-                    $header = "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`n" +
+                    $header = "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`n$extra" +
                         "Content-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n"
                     $headerBytes = [Text.Encoding]::ASCII.GetBytes($header)
                     $stream.Write($headerBytes, 0, $headerBytes.Length)
@@ -293,27 +333,29 @@ function Start-FakeCleanupServer {
     return [pscustomobject]@{ Job = $job; Port = $port }
 }
 
-$raw = 'um so can you check the tailscale status on the mini pc you know'
-Assert-Equal 'valid cleanup accepted' 'So can you check the Tailscale status on the mini PC?' `
-    (Invoke-Cleanup $raw 'So can you check the Tailscale status on the mini PC?')
-Assert-Equal 'empty answer rejected' $raw (Invoke-Cleanup $raw '')
-Assert-Equal 'large growth rejected' $raw `
-    (Invoke-Cleanup $raw (($raw + ' extra explanation ') * 4))
-Assert-Equal 'large shrink rejected' $raw (Invoke-Cleanup $raw 'Check status.')
-Assert-Equal 'lost content words rejected' $raw `
-    (Invoke-Cleanup $raw 'Please inspect whether everything works correctly today.')
+# The guard answers every port must give, from the shared cases file.
+$rulesPath = Join-Path (Split-Path -Parent $windowsRoot) 'cleanup.json'
+$casesPath = Join-Path (Split-Path -Parent $windowsRoot) 'cleanup-cases.json'
+try {
+    $cases = @((Get-Content -LiteralPath $casesPath -Raw -Encoding UTF8 | ConvertFrom-Json).cases)
+    if ($cases.Count -lt 12) { $failures.Add("cleanup-cases.json has only $($cases.Count) cases") }
+    foreach ($case in $cases) {
+        Assert-Equal "cleanup case: $($case.name)" $case.expect `
+            (Invoke-Cleanup $case.raw $case.cleaned -Link $case.link)
+    }
+} catch { $failures.Add("cleanup cases failed to run: $($_.Exception.Message)") }
 
-$grammarRaw = 'how can i use this controller as a to control my mouse'
-Assert-Equal 'invented word rejected' $grammarRaw `
-    (Invoke-Cleanup $grammarRaw 'How can I use this controller as a way to control my mouse?')
-Assert-Equal 'broken grammar preserved' 'How can I use this controller as a to control my mouse?' `
-    (Invoke-Cleanup $grammarRaw 'How can I use this controller as a to control my mouse?')
-Assert-Equal 'thinking block removed' 'Check the Tailscale status on the mini PC.' `
-    (Invoke-Cleanup 'check the tailscale status on the mini pc' `
-        '<think>reasoning that must never be typed</think> Check the Tailscale status on the mini PC.')
-Assert-Equal 'wrapper quotes removed' 'Check the Tailscale status on the mini PC.' `
-    (Invoke-Cleanup 'check the tailscale status on the mini pc' `
-        '"Check the Tailscale status on the mini PC."')
+$raw = 'um so can you check the tailscale status on the mini pc you know'
+$oldRulesFile = $env:VOXTYPE_CLEANUP_FILE
+try {
+    # Without the rules there is no guard to pass, so even a good answer leaves the text as said.
+    $env:VOXTYPE_CLEANUP_FILE = Join-Path ([IO.Path]::GetTempPath()) 'voxtype-no-such-cleanup.json'
+    Assert-Equal 'missing cleanup rules keep the text' $raw `
+        (Invoke-Cleanup $raw 'So can you check the Tailscale status on the mini PC?')
+} finally {
+    if ($null -eq $oldRulesFile) { Remove-Item Env:VOXTYPE_CLEANUP_FILE -ErrorAction SilentlyContinue }
+    else { $env:VOXTYPE_CLEANUP_FILE = $oldRulesFile }
+}
 
 $oldBackend = $env:VOXTYPE_CLEANUP_BACKEND
 try {
@@ -329,20 +371,298 @@ try {
         (Invoke-Cleanup $raw '' -CallBackend)
 
     $httpCandidate = 'So can you check the Tailscale status on the mini PC?'
-    $fake = Start-FakeCleanupServer $httpCandidate
+    $requestFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-request-' + [guid]::NewGuid().ToString('N'))
+    $fake = Start-FakeCleanupServer $httpCandidate $requestFile
     try {
         $env:VOXTYPE_CLEANUP_ENDPOINT = "http://127.0.0.1:$($fake.Port)"
         Assert-Equal 'local HTTP response accepted' $httpCandidate `
             (Invoke-Cleanup $raw '' -CallBackend)
         Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
         if ($fake.Job.State -ne 'Completed') { $failures.Add('fake cleanup server did not finish') }
+        # What the server was sent comes from the shared rules: their prompt and examples.
+        $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $messages = @($sent.messages)
+        if (-not ([string]$messages[0].content).StartsWith(@($rules.instructions) -join "`n")) {
+            $failures.Add('the local request does not start with the shared instructions')
+        }
+        Assert-Equal 'local request carries every example' ([string](2 + 2 * @($rules.examples).Count)) `
+            ([string]$messages.Count)
+        Assert-Equal 'local request wraps an example' `
+            ($rules.transcript.Replace('{text}', $rules.examples[0].raw)) ([string]$messages[1].content)
+        Assert-Equal 'local request wraps the dictation' `
+            ($rules.transcript.Replace('{text}', $raw)) ([string]$messages[-1].content)
+        $budget = [regex]::Matches($raw, '\S+').Count * $rules.request.max_tokens_per_word +
+            $rules.request.max_tokens_extra
+        Assert-Equal 'local request token budget' ([string]$budget) ([string]$sent.max_tokens)
     } finally {
+        Remove-Item -LiteralPath $requestFile -ErrorAction SilentlyContinue
         Stop-Job $fake.Job -ErrorAction SilentlyContinue
         Remove-Job $fake.Job -Force -ErrorAction SilentlyContinue
     }
 } finally {
     $env:VOXTYPE_CLEANUP_BACKEND = $oldBackend
     Remove-Item Env:VOXTYPE_CLEANUP_ENDPOINT -ErrorAction SilentlyContinue
+}
+
+# opencode: one Messages API request to OpenCode Go, the key read in place from pi's store
+# (never this machine's: PI_CODING_AGENT_DIR points at a temporary one), sent as a header.
+$oldBackend = $env:VOXTYPE_CLEANUP_BACKEND
+$oldAgent = $env:PI_CODING_AGENT_DIR
+$piAgent = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-pi-' + [guid]::NewGuid().ToString('N'))
+try {
+    $env:VOXTYPE_CLEANUP_BACKEND = 'opencode'
+    $env:PI_CODING_AGENT_DIR = $piAgent
+    Remove-Item Env:VOXTYPE_CLEANUP_OPENCODE_KEY -ErrorAction SilentlyContinue
+    $env:VOXTYPE_CLEANUP_OPENCODE_ENDPOINT = 'http://127.0.0.1:1/v1/messages'
+    Assert-Equal 'opencode without a key keeps the text' $raw (Invoke-Cleanup $raw '' -CallBackend)
+    [IO.Directory]::CreateDirectory($piAgent) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $piAgent 'auth.json'),
+        '{"zai":{"type":"api_key","key":"other"},"opencode-go":{"type":"api_key","key":"from-pi"}}')
+    $httpCandidate = 'So can you check the Tailscale status on the mini PC?'
+    $requestFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-request-' + [guid]::NewGuid().ToString('N'))
+    $timingFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-timing-' + [guid]::NewGuid().ToString('N'))
+    $fake = Start-FakeCleanupServer $httpCandidate $requestFile -Messages
+    try {
+        $env:VOXTYPE_CLEANUP_OPENCODE_ENDPOINT = "http://127.0.0.1:$($fake.Port)/v1/messages"
+        $env:VOXTYPE_CLEANUP_TIMING_FILE = $timingFile
+        Assert-Equal 'opencode answer accepted, its text blocks only' $httpCandidate `
+            (Invoke-Cleanup $raw '' -CallBackend)
+        Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
+        $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $headers = @(Get-Content -LiteralPath ($requestFile + '.headers'))
+        Assert-Equal "opencode reads pi's key" 'from-pi' `
+            ((@($headers | Where-Object { $_ -match '^x-api-key:' }) -join '|') -replace '^x-api-key:\s*', '')
+        Assert-Equal 'opencode names itself' 'voxtype-cleanup/1.0' `
+            ((@($headers | Where-Object { $_ -match '^User-Agent:' }) -join '|') -replace '^User-Agent:\s*', '')
+        if (-not (@($headers | Where-Object { $_ -match '^x-opencode-session:\s*voxtype-[0-9a-f]{32}$' }).Count -eq 1)) {
+            $failures.Add('opencode request has no session ID')
+        }
+        Assert-Equal 'opencode model' 'qwen3.8-flash' ([string]$sent.model)
+        Assert-Equal 'opencode turns thinking off' 'disabled' ([string]$sent.thinking.type)
+        if (-not ([string]$sent.system).StartsWith(@($rules.instructions) -join "`n")) {
+            $failures.Add('the opencode request does not start with the shared instructions')
+        }
+        Assert-Equal 'opencode carries every example' ([string](1 + 2 * @($rules.examples).Count)) `
+            ([string]@($sent.messages).Count)
+        Assert-Equal 'opencode sends no system turn' '0' `
+            ([string]@($sent.messages | Where-Object { $_.role -eq 'system' }).Count)
+        $budget = [regex]::Matches($raw, '\S+').Count * $rules.request.max_tokens_per_word +
+            $rules.request.max_tokens_extra + $rules.request.max_tokens_thinking
+        Assert-Equal 'opencode token budget has the thinking room' ([string]$budget) ([string]$sent.max_tokens)
+        $timed = Get-Content -LiteralPath $timingFile -Raw | ConvertFrom-Json
+        Assert-Equal 'timing: opencode answered' 'opencode' ([string]$timed.link)
+        Assert-Equal 'timing: changed' 'changed' ([string]$timed.outcome)
+        Assert-Equal 'timing: tokens in' '791' ([string]$timed.server.usage.input_tokens)
+        if ($null -ne $timed.server.PSObject.Properties['served_from']) {
+            $failures.Add('timing: a request without Cf-Placement has a served_from')
+        }
+        Assert-Equal 'timing: steps in order' 'began rules opencode:built opencode:answered opencode:guarded done' `
+            (@($timed.marks | ForEach-Object { $_.name }) -join ' ')
+        $ats = @($timed.marks | ForEach-Object { [long]$_.at })
+        $sorted = @($ats | Sort-Object)
+        if (($ats -join ',') -ne ($sorted -join ',')) { $failures.Add('timing marks go back in time') }
+    } finally {
+        Remove-Item -LiteralPath $requestFile, ($requestFile + '.headers'), $timingFile -ErrorAction SilentlyContinue
+        Stop-Job $fake.Job -ErrorAction SilentlyContinue
+        Remove-Job $fake.Job -Force -ErrorAction SilentlyContinue
+    }
+    # Cloudflare's placement, when the request ran away from the edge that took it.
+    $fake = Start-FakeCleanupServer $httpCandidate '' -Messages -Placement 'remote-DUB'
+    try {
+        $env:VOXTYPE_CLEANUP_OPENCODE_ENDPOINT = "http://127.0.0.1:$($fake.Port)/v1/messages"
+        Assert-Equal 'opencode answer from a placed request' $httpCandidate (Invoke-Cleanup $raw '' -CallBackend)
+        $timed = Get-Content -LiteralPath $timingFile -Raw | ConvertFrom-Json
+        Assert-Equal 'timing: served from' 'remote-DUB' ([string]$timed.server.served_from)
+    } finally {
+        Remove-Item -LiteralPath $timingFile -ErrorAction SilentlyContinue
+        Stop-Job $fake.Job -ErrorAction SilentlyContinue
+        Remove-Job $fake.Job -Force -ErrorAction SilentlyContinue
+    }
+} finally {
+    $env:VOXTYPE_CLEANUP_BACKEND = $oldBackend
+    $env:PI_CODING_AGENT_DIR = $oldAgent
+    Remove-Item Env:VOXTYPE_CLEANUP_OPENCODE_ENDPOINT, Env:VOXTYPE_CLEANUP_TIMING_FILE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $piAgent -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# The OpenCode Go key, like Groq's, is read in place from the file
+# VOXTYPE_CLEANUP_OPENCODE_KEY_FILE names, after VOXTYPE_CLEANUP_OPENCODE_KEY.
+$openCodeKeyFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-opencode-key-' + [guid]::NewGuid().ToString('N'))
+$oldOpenCodeKey = $env:VOXTYPE_CLEANUP_OPENCODE_KEY
+try {
+    Remove-Item Env:VOXTYPE_CLEANUP_OPENCODE_KEY -ErrorAction SilentlyContinue
+    $env:VOXTYPE_CLEANUP_OPENCODE_KEY_FILE = $openCodeKeyFile
+    [IO.File]::WriteAllText($openCodeKeyFile, "from-file`r`n")
+    Assert-Equal 'the OpenCode Go key is read from its file' 'from-file' (Get-OpenCodeKey)
+    $env:VOXTYPE_CLEANUP_OPENCODE_KEY = 'from-environment'
+    Assert-Equal 'VOXTYPE_CLEANUP_OPENCODE_KEY comes first' 'from-environment' (Get-OpenCodeKey)
+} finally {
+    Remove-Item Env:VOXTYPE_CLEANUP_OPENCODE_KEY_FILE -ErrorAction SilentlyContinue
+    if ($null -ne $oldOpenCodeKey) { $env:VOXTYPE_CLEANUP_OPENCODE_KEY = $oldOpenCodeKey }
+    else { Remove-Item Env:VOXTYPE_CLEANUP_OPENCODE_KEY -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $openCodeKeyFile -Force -ErrorAction SilentlyContinue
+}
+
+# anthropic: one Messages API request to Anthropic with the user's own key, read in place from
+# the file VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE names, or VOXTYPE_CLEANUP_ANTHROPIC_KEY, sent as
+# a header. Claude Haiku 5.5 refuses temperature and top_p, so neither is sent.
+$oldBackend = $env:VOXTYPE_CLEANUP_BACKEND
+$oldAnthropicKey = $env:VOXTYPE_CLEANUP_ANTHROPIC_KEY
+$anthropicKeyFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-anthropic-key-' + [guid]::NewGuid().ToString('N'))
+try {
+    $env:VOXTYPE_CLEANUP_BACKEND = 'anthropic'
+    Remove-Item Env:VOXTYPE_CLEANUP_ANTHROPIC_KEY -ErrorAction SilentlyContinue
+    $env:VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE = $anthropicKeyFile
+    $env:VOXTYPE_CLEANUP_ANTHROPIC_ENDPOINT = 'http://127.0.0.1:1/v1/messages'
+    Assert-Equal 'anthropic without a key keeps the text' $raw (Invoke-Cleanup $raw '' -CallBackend)
+    Assert-Equal 'no Anthropic key without its file' '' (Get-AnthropicKey)
+    [IO.File]::WriteAllText($anthropicKeyFile, "from-file`r`n")
+    Assert-Equal 'the Anthropic key is read from its file' 'from-file' (Get-AnthropicKey)
+    $env:VOXTYPE_CLEANUP_ANTHROPIC_KEY = 'from-environment'
+    try { Assert-Equal 'VOXTYPE_CLEANUP_ANTHROPIC_KEY comes first' 'from-environment' (Get-AnthropicKey) }
+    finally { Remove-Item Env:VOXTYPE_CLEANUP_ANTHROPIC_KEY -ErrorAction SilentlyContinue }
+    $httpCandidate = 'So can you check the Tailscale status on the mini PC?'
+    $requestFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-request-' + [guid]::NewGuid().ToString('N'))
+    $timingFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-timing-' + [guid]::NewGuid().ToString('N'))
+    $fake = Start-FakeCleanupServer $httpCandidate $requestFile -Messages
+    try {
+        $env:VOXTYPE_CLEANUP_ANTHROPIC_ENDPOINT = "http://127.0.0.1:$($fake.Port)/v1/messages"
+        $env:VOXTYPE_CLEANUP_TIMING_FILE = $timingFile
+        Assert-Equal 'anthropic answer accepted, its text blocks only' $httpCandidate `
+            (Invoke-Cleanup $raw '' -CallBackend)
+        Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
+        $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $headers = @(Get-Content -LiteralPath ($requestFile + '.headers'))
+        Assert-Equal 'anthropic sends the key from its file' 'from-file' `
+            ((@($headers | Where-Object { $_ -match '^x-api-key:' }) -join '|') -replace '^x-api-key:\s*', '')
+        Assert-Equal 'anthropic names its API version' '2023-06-01' `
+            ((@($headers | Where-Object { $_ -match '^anthropic-version:' }) -join '|') -replace '^anthropic-version:\s*', '')
+        if (@($headers | Where-Object { $_ -match '^x-opencode-session:' }).Count -ne 0) {
+            $failures.Add('anthropic was sent an OpenCode Go session')
+        }
+        Assert-Equal 'anthropic model' 'claude-haiku-5-5' ([string]$sent.model)
+        Assert-Equal 'anthropic turns thinking off' 'disabled' ([string]$sent.thinking.type)
+        foreach ($name in @('temperature', 'top_p')) {
+            if ($null -ne $sent.PSObject.Properties[$name]) { $failures.Add("anthropic was sent $name") }
+        }
+        if (-not ([string]$sent.system).StartsWith(@($rules.instructions) -join "`n")) {
+            $failures.Add('the anthropic request does not start with the shared instructions')
+        }
+        Assert-Equal 'anthropic carries every example' ([string](1 + 2 * @($rules.examples).Count)) `
+            ([string]@($sent.messages).Count)
+        # Claude honours thinking off, so it gets no thinking room.
+        $budget = [regex]::Matches($raw, '\S+').Count * $rules.request.max_tokens_per_word +
+            $rules.request.max_tokens_extra
+        Assert-Equal 'anthropic token budget has no thinking room' ([string]$budget) ([string]$sent.max_tokens)
+        $timed = Get-Content -LiteralPath $timingFile -Raw | ConvertFrom-Json
+        Assert-Equal 'timing: anthropic answered' 'anthropic' ([string]$timed.link)
+        Assert-Equal 'timing: anthropic tokens in' '791' ([string]$timed.server.usage.input_tokens)
+        Assert-Equal 'timing: anthropic steps in order' `
+            'began rules anthropic:built anthropic:answered anthropic:guarded done' `
+            (@($timed.marks | ForEach-Object { $_.name }) -join ' ')
+    } finally {
+        Remove-Item -LiteralPath $requestFile, ($requestFile + '.headers'), $timingFile -ErrorAction SilentlyContinue
+        Stop-Job $fake.Job -ErrorAction SilentlyContinue
+        Remove-Job $fake.Job -Force -ErrorAction SilentlyContinue
+    }
+} finally {
+    $env:VOXTYPE_CLEANUP_BACKEND = $oldBackend
+    if ($null -ne $oldAnthropicKey) { $env:VOXTYPE_CLEANUP_ANTHROPIC_KEY = $oldAnthropicKey }
+    Remove-Item Env:VOXTYPE_CLEANUP_ANTHROPIC_ENDPOINT, Env:VOXTYPE_CLEANUP_ANTHROPIC_KEY_FILE, `
+        Env:VOXTYPE_CLEANUP_TIMING_FILE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $anthropicKeyFile -ErrorAction SilentlyContinue
+}
+
+# groq: one chat request to Groq with the user's own key, read in place from the file
+# VOXTYPE_CLEANUP_GROQ_KEY_FILE names, or VOXTYPE_CLEANUP_GROQ_KEY, sent as a header.
+$oldBackend = $env:VOXTYPE_CLEANUP_BACKEND
+$groqKeyFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-groq-key-' + [guid]::NewGuid().ToString('N'))
+try {
+    $env:VOXTYPE_CLEANUP_BACKEND = 'groq'
+    $env:VOXTYPE_CLEANUP_GROQ_KEY_FILE = $groqKeyFile
+    $env:VOXTYPE_CLEANUP_GROQ_ENDPOINT = 'http://127.0.0.1:1/openai/v1/chat/completions'
+    Assert-Equal 'groq without a key keeps the text' $raw (Invoke-Cleanup $raw '' -CallBackend)
+    Assert-Equal 'no Groq key without its file' '' (Get-GroqKey)
+    [IO.File]::WriteAllText($groqKeyFile, "from-file`r`n")
+    Assert-Equal 'the Groq key is read from its file' 'from-file' (Get-GroqKey)
+    $env:VOXTYPE_CLEANUP_GROQ_KEY = 'from-environment'
+    try { Assert-Equal 'VOXTYPE_CLEANUP_GROQ_KEY comes first' 'from-environment' (Get-GroqKey) }
+    finally { Remove-Item Env:VOXTYPE_CLEANUP_GROQ_KEY -ErrorAction SilentlyContinue }
+    $httpCandidate = 'So can you check the Tailscale status on the mini PC?'
+    $requestFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-request-' + [guid]::NewGuid().ToString('N'))
+    $timingFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-timing-' + [guid]::NewGuid().ToString('N'))
+    $fake = Start-FakeCleanupServer $httpCandidate $requestFile -Chat
+    try {
+        $env:VOXTYPE_CLEANUP_GROQ_ENDPOINT = "http://127.0.0.1:$($fake.Port)/openai/v1/chat/completions"
+        $env:VOXTYPE_CLEANUP_TIMING_FILE = $timingFile
+        Assert-Equal 'groq answer accepted, its content only' $httpCandidate (Invoke-Cleanup $raw '' -CallBackend)
+        Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
+        $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $headers = @(Get-Content -LiteralPath ($requestFile + '.headers'))
+        Assert-Equal 'groq sends the key from its file' 'Bearer from-file' `
+            ((@($headers | Where-Object { $_ -match '^Authorization:' }) -join '|') -replace '^Authorization:\s*', '')
+        Assert-Equal 'groq model' 'openai/gpt-oss-20b' ([string]$sent.model)
+        Assert-Equal 'groq reasons at low effort' 'low' ([string]$sent.reasoning_effort)
+        Assert-Equal 'groq starts with the system turn' 'system' ([string]@($sent.messages)[0].role)
+        if (-not ([string]@($sent.messages)[0].content).StartsWith(@($rules.instructions) -join "`n")) {
+            $failures.Add('the groq request does not start with the shared instructions')
+        }
+        Assert-Equal 'groq carries every example' ([string](2 + 2 * @($rules.examples).Count)) `
+            ([string]@($sent.messages).Count)
+        $budget = [regex]::Matches($raw, '\S+').Count * $rules.request.max_tokens_per_word +
+            $rules.request.max_tokens_extra + $rules.request.max_tokens_thinking
+        Assert-Equal 'groq token budget has the thinking room' ([string]$budget) `
+            ([string]$sent.max_completion_tokens)
+        if ($null -ne $sent.PSObject.Properties['max_tokens']) { $failures.Add('groq was sent max_tokens') }
+        $timed = Get-Content -LiteralPath $timingFile -Raw | ConvertFrom-Json
+        Assert-Equal 'timing: groq answered' 'groq' ([string]$timed.link)
+        Assert-Equal 'timing: groq tokens in' '802' ([string]$timed.server.usage.prompt_tokens)
+        Assert-Equal 'timing: groq steps in order' 'began rules groq:built groq:answered groq:guarded done' `
+            (@($timed.marks | ForEach-Object { $_.name }) -join ' ')
+    } finally {
+        Remove-Item -LiteralPath $requestFile, ($requestFile + '.headers'), $timingFile -ErrorAction SilentlyContinue
+        Stop-Job $fake.Job -ErrorAction SilentlyContinue
+        Remove-Job $fake.Job -Force -ErrorAction SilentlyContinue
+    }
+} finally {
+    $env:VOXTYPE_CLEANUP_BACKEND = $oldBackend
+    Remove-Item Env:VOXTYPE_CLEANUP_GROQ_ENDPOINT, Env:VOXTYPE_CLEANUP_GROQ_KEY_FILE, `
+        Env:VOXTYPE_CLEANUP_TIMING_FILE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $groqKeyFile -ErrorAction SilentlyContinue
+}
+
+# A timed test that keeps the text says why: here, the local server is down, cleanup is
+# off, and the dictation is too short to send.
+$oldBackend = $env:VOXTYPE_CLEANUP_BACKEND
+$timingFile = Join-Path ([IO.Path]::GetTempPath()) ('voxtype-timing-' + [guid]::NewGuid().ToString('N'))
+try {
+    $env:VOXTYPE_CLEANUP_BACKEND = 'local'
+    $env:VOXTYPE_CLEANUP_ENDPOINT = 'http://127.0.0.1:1'
+    $env:VOXTYPE_CLEANUP_TIMING_FILE = $timingFile
+    Assert-Equal 'timed passthrough' $raw (Invoke-Cleanup $raw '' -CallBackend)
+    $timed = Get-Content -LiteralPath $timingFile -Raw | ConvertFrom-Json
+    Assert-Equal 'timing: kept' 'kept' ([string]$timed.outcome)
+    if (@($timed.why).Count -ne 1 -or -not ([string]@($timed.why)[0]).StartsWith('local: ')) {
+        $failures.Add("timing: the reason names the link: <$(@($timed.why) -join '; ')>")
+    }
+    Remove-Item -LiteralPath $timingFile -ErrorAction SilentlyContinue
+    $env:VOXTYPE_CLEANUP_BACKEND = 'off'
+    Assert-Equal 'timed off' $raw (Invoke-Cleanup $raw '' -CallBackend)
+    $timed = Get-Content -LiteralPath $timingFile -Raw | ConvertFrom-Json
+    Assert-Equal 'timing: off says so' 'cleanup is off' (@($timed.why) -join '; ')
+    Remove-Item -LiteralPath $timingFile -ErrorAction SilentlyContinue
+    $env:VOXTYPE_CLEANUP_BACKEND = 'local'
+    Assert-Equal 'timed short' 'restart it' (Invoke-Cleanup 'restart it' '' -CallBackend)
+    $timed = Get-Content -LiteralPath $timingFile -Raw | ConvertFrom-Json
+    Assert-Equal 'timing: too short to send' 'short' ([string]$timed.outcome)
+} finally {
+    $env:VOXTYPE_CLEANUP_BACKEND = $oldBackend
+    Remove-Item Env:VOXTYPE_CLEANUP_ENDPOINT, Env:VOXTYPE_CLEANUP_TIMING_FILE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $timingFile -ErrorAction SilentlyContinue
 }
 
 # A recorded chain is tried link by link: a stubbed pi CLI first, then the fake local
@@ -583,6 +903,37 @@ exit /b 0
         if (-not (Test-Path -LiteralPath $backendFile -PathType Leaf)) { return '<absent>' }
         return [IO.File]::ReadAllText($backendFile)
     }
+    # opencode needs a key: a warning without one, none once there is one, and never the key.
+    $run = Invoke-BackendSetup @('-CleanupBackend', 'OpenCode')
+    Assert-Equal 'setup records the opencode backend' 'opencode' (Get-RecordedBackend)
+    if ($run.Text -notmatch 'No OpenCode Go key') {
+        $failures.Add("setup did not warn that opencode has no key`n$($run.Text)")
+    }
+    $env:VOXTYPE_CLEANUP_OPENCODE_KEY = 'setup-test-key'
+    try { $run = Invoke-BackendSetup @('-CleanupBackend', 'opencode,local') }
+    finally { Remove-Item Env:VOXTYPE_CLEANUP_OPENCODE_KEY -ErrorAction SilentlyContinue }
+    if ($run.Text -match 'No OpenCode Go key') { $failures.Add('setup warned about a key it has') }
+    if ($run.Text -match 'setup-test-key') { $failures.Add('setup printed the OpenCode Go key') }
+    # anthropic too, and its key is never printed.
+    $run = Invoke-BackendSetup @('-CleanupBackend', 'Anthropic')
+    Assert-Equal 'setup records the anthropic backend' 'anthropic' (Get-RecordedBackend)
+    if ($run.Text -notmatch 'No Anthropic key') {
+        $failures.Add("setup did not warn that anthropic has no key`n$($run.Text)")
+    }
+    $env:VOXTYPE_CLEANUP_ANTHROPIC_KEY = 'setup-test-anthropic-key'
+    try { $run = Invoke-BackendSetup @('-CleanupBackend', 'anthropic,local') }
+    finally { Remove-Item Env:VOXTYPE_CLEANUP_ANTHROPIC_KEY -ErrorAction SilentlyContinue }
+    if ($run.Text -match 'No Anthropic key') { $failures.Add('setup warned about an Anthropic key it has') }
+    if ($run.Text -match 'setup-test-anthropic-key') { $failures.Add('setup printed the Anthropic key') }
+    # groq too, and its key is never printed.
+    $run = Invoke-BackendSetup @('-CleanupBackend', 'Groq,local')
+    Assert-Equal 'setup records the groq backend' 'groq,local' (Get-RecordedBackend)
+    if ($run.Text -notmatch 'No Groq key') { $failures.Add("setup did not warn that groq has no key`n$($run.Text)") }
+    $env:VOXTYPE_CLEANUP_GROQ_KEY = 'setup-test-groq-key'
+    try { $run = Invoke-BackendSetup @('-CleanupBackend', 'groq') }
+    finally { Remove-Item Env:VOXTYPE_CLEANUP_GROQ_KEY -ErrorAction SilentlyContinue }
+    if ($run.Text -match 'No Groq key') { $failures.Add('setup warned about a Groq key it has') }
+    if ($run.Text -match 'setup-test-groq-key') { $failures.Add('setup printed the Groq key') }
     $run = Invoke-BackendSetup @('-CleanupBackend', 'Pi')
     if ($run.Exit -ne 0) { $failures.Add("setup -CleanupBackend Pi exited $($run.Exit)`n$($run.Text)") }
     Assert-Equal 'setup records the cleanup backend' 'pi' (Get-RecordedBackend)
@@ -709,7 +1060,9 @@ exit /b 0
                     @('parakeet', 'pi', $false, $false, $true),
                     @('whisper', 'pi', $true, $false, $true),
                     @('cleanup', 'pi', $true, $true, $false),
-                    @('cleanup', 'pi,local', $true, $false, $true))) {
+                    @('cleanup', 'pi,local', $true, $false, $true),
+                    @('cleanup', 'opencode', $true, $false, $false),
+                    @('cleanup', 'opencode,local', $true, $false, $true))) {
                 $fetched = $needed.Invoke($null, [object[]]@($case[0], $case[1], $case[2], $case[3]))
                 if ($fetched -ne $case[4]) {
                     $failures.Add("guided setup fetches $($case[0]) for $($case[1]) " +
