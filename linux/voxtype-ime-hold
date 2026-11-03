@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Keeps an input method from rewriting dictated text, for voxtype's
+# output.pre_output_command ("voxtype-ime-hold begin") and
+# output.post_output_command ("voxtype-ime-hold end").
+#
+# voxtype types a dictation as keystrokes (wtype, dotool or ydotool). With a
+# Vietnamese input method active in fcitx5 -- Unikey or Bamboo on Telex --
+# those keystrokes are composed like any typed ones: "dd" becomes "đ", a
+# vowel followed by s, f, r, x or j takes a tone mark, "w" becomes "ư", so an
+# English dictation comes out in Vietnamese letters.
+#
+#   begin   when fcitx5 has an input method active (fcitx5-remote prints 2),
+#           switch it to the plain keyboard (-c) and remember that it was on
+#   end     switch it back on (-o) if begin switched it off; voxtype runs
+#           this even when typing failed, so the input method is never left off
+#
+# Pasting instead of typing (output.mode = "paste") would dodge the input
+# method too, but it replaces the clipboard, and every dictation would land in
+# the clipboard history. Without fcitx5, or with it on its plain keyboard,
+# both are no-ops. Always exits 0 so it can never stop a dictation.
+set -u
+
+remote="${VOXTYPE_IME_REMOTE:-fcitx5-remote}"
+held="${XDG_RUNTIME_DIR:-/tmp}/voxtype-ime-hold.$(id -u)"
+
+command -v "$remote" >/dev/null 2>&1 || exit 0
+case "${1:-}" in
+  begin)
+    if [[ "$("$remote" 2>/dev/null)" == 2 ]]; then
+      : > "$held"
+      "$remote" -c >/dev/null 2>&1
+    else
+      rm -f "$held"
+    fi
+    ;;
+  end)
+    if [[ -e $held ]]; then
+      rm -f "$held"
+      "$remote" -o >/dev/null 2>&1
+    fi
+    ;;
+  -h|--help)
+    sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    echo "usage: voxtype-ime-hold begin|end" >&2
+    ;;
+esac
+exit 0

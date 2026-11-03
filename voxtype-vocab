@@ -121,7 +121,8 @@ ptr_get() { # ptr_get <KEY>  -> value on stdout, non-zero if absent
 
 # The file a term is TYPED into, which is not the file the read path parses.
 # The installed copy is a build artifact; editing it is reverted by the next
-# install, so the write path refuses to touch it.
+# install, so the write path refuses to touch it -- unless Libre keeps it
+# (vocabulary.libre beside it), when the installers record it as the source.
 source_file() {
   local s=""
   if [ -n "${VOXTYPE_VOCAB_SOURCE:-}" ]; then
