@@ -84,7 +84,10 @@ function Invoke-Cleanup {
     $process = [Diagnostics.Process]::Start($start)
     $outTask = $process.StandardOutput.ReadToEndAsync()
     $errTask = $process.StandardError.ReadToEndAsync()
-    $process.StandardInput.Write($Raw)
+    # UTF-8, as VoxType pipes it: StandardInput would encode with the console's code page, and
+    # Windows PowerShell's .NET has no StandardInputEncoding to change that.
+    $rawBytes = [Text.UTF8Encoding]::new($false).GetBytes($Raw)
+    $process.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
     $process.StandardInput.Close()
     $process.WaitForExit()
     $output = $outTask.GetAwaiter().GetResult()
@@ -267,8 +270,10 @@ function Start-FakeCleanupServer {
                 $client = $listener.AcceptTcpClient()
                 try {
                     $stream = $client.GetStream()
-                    $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false,
-                        1024, $true)
+                    # Latin-1 keeps one char a byte, so Content-Length counts the body read; the
+                    # body is then UTF-8, as every request sends it.
+                    $latin1 = [Text.Encoding]::GetEncoding(28591)
+                    $reader = [IO.StreamReader]::new($stream, $latin1, $false, 1024, $true)
                     $contentLength = 0
                     $headerLines = [System.Collections.Generic.List[string]]::new()
                     while (($line = $reader.ReadLine()) -ne '') {
@@ -288,7 +293,8 @@ function Start-FakeCleanupServer {
                     }
                     $completion = $Messages -or $Chat -or $requestIndex -eq 1
                     if ($completion -and $RequestFile -and $contentLength -gt 0) {
-                        [IO.File]::WriteAllText($RequestFile, [string]::new($buffer, 0, $read))
+                        [IO.File]::WriteAllText($RequestFile,
+                            [Text.Encoding]::UTF8.GetString($latin1.GetBytes([string]::new($buffer, 0, $read))))
                         if ($Messages -or $Chat) { [IO.File]::WriteAllLines($RequestFile + '.headers', $headerLines) }
                     }
                     $extra = ''
@@ -387,7 +393,7 @@ try {
         if ($fake.Job.State -ne 'Completed') { $failures.Add('fake cleanup server did not finish') }
         # What the server was sent comes from the shared rules: their prompt and examples.
         $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $messages = @($sent.messages)
         if (-not ([string]$messages[0].content).StartsWith(@($rules.instructions) -join "`n")) {
             $failures.Add('the local request does not start with the shared instructions')
@@ -436,7 +442,7 @@ try {
             (Invoke-Cleanup $raw '' -CallBackend)
         Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
         $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $headers = @(Get-Content -LiteralPath ($requestFile + '.headers'))
         Assert-Equal "opencode reads pi's key" 'from-pi' `
             ((@($headers | Where-Object { $_ -match '^x-api-key:' }) -join '|') -replace '^x-api-key:\s*', '')
@@ -540,7 +546,7 @@ try {
             (Invoke-Cleanup $raw '' -CallBackend)
         Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
         $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $headers = @(Get-Content -LiteralPath ($requestFile + '.headers'))
         Assert-Equal 'anthropic sends the key from its file' 'from-file' `
             ((@($headers | Where-Object { $_ -match '^x-api-key:' }) -join '|') -replace '^x-api-key:\s*', '')
@@ -607,7 +613,7 @@ try {
         Assert-Equal 'groq answer accepted, its content only' $httpCandidate (Invoke-Cleanup $raw '' -CallBackend)
         Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
         $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $headers = @(Get-Content -LiteralPath ($requestFile + '.headers'))
         Assert-Equal 'groq sends the key from its file' 'Bearer from-file' `
             ((@($headers | Where-Object { $_ -match '^Authorization:' }) -join '|') -replace '^Authorization:\s*', '')
@@ -672,7 +678,7 @@ try {
         Assert-Equal 'cerebras answer accepted, trimmed' $httpCandidate (Invoke-Cleanup $raw '' -CallBackend)
         Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
         $rules = Get-Content -LiteralPath $rulesPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $headers = @(Get-Content -LiteralPath ($requestFile + '.headers'))
         Assert-Equal 'cerebras sends the key from its file' 'Bearer from-file' `
             ((@($headers | Where-Object { $_ -match '^Authorization:' }) -join '|') -replace '^Authorization:\s*', '')
@@ -712,7 +718,7 @@ try {
         $env:VOXTYPE_CLEANUP_CEREBRAS_MODEL = 'gpt-oss-120b'
         Assert-Equal 'cerebras gpt-oss answer accepted' $httpCandidate (Invoke-Cleanup $raw '' -CallBackend)
         Wait-Job -Job $fake.Job -Timeout 5 | Out-Null
-        $sent = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+        $sent = Get-Content -LiteralPath $requestFile -Raw -Encoding UTF8 | ConvertFrom-Json
         Assert-Equal 'cerebras gpt-oss reasons at low effort' 'gpt-oss-120b low' `
             "$($sent.model) $($sent.reasoning_effort)"
     } finally {

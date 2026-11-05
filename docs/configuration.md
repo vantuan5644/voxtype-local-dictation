@@ -18,7 +18,7 @@ selects replacements.
 |---|---|---|---|---|
 | `hotkey.enabled` / `hotkey.mode` | `true` / `push_to_talk` | same | enabled only with `-Hotkey` / `push_to_talk` | Windows requires an explicit user choice |
 | `hotkey.key` | `FN` | `RIGHTALT` | user-selected | avoids an implicit Windows-wide key choice |
-| `whisper.language` | `en` | `en` | `en` | bilingual values were tried and reverted |
+| `whisper.language` | `en` | `en` until Libre keeps the vocabulary | `en` | the seed; once Libre is set up, its Settings > Languages sets it (`en,vi` with Vietnamese chosen), and the Linux installers leave it alone |
 | `engine` | — | — | `whisper` (`-Engine` changes it) | the engine dictation uses: Whisper with its prompt spells more of the user's terms; recordings run Parakeet by passing `--engine parakeet` to `voxtype transcribe` |
 | `parakeet.model` | — | — | wizard-managed local folder, set when setup's Parakeet box is ticked | Windows verifies the three pinned files before saving it |
 | `whisper.model` | user-selected | user-selected | wizard-managed local path | Windows verifies the pinned file before saving it |
