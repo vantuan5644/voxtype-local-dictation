@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "recipe": "summary-v2",
+  "recipe": "summary-v3",
   "about": [
     "Meeting summaries, shared by every port: meeting_summary.py on Windows and Linux and the",
     "Apple app read this file, so a meeting is summarised with the same request everywhere",
@@ -62,7 +62,9 @@
     "  says one: the app shows the names.",
     "- Use only what the transcript says. With no decisions, actions or open questions,",
     "  give an empty list.",
-    "- Write in English."
+    "- Write in the language the transcript is in: Vietnamese for a Vietnamese",
+    "  transcript, English for an English one; when it mixes both, the one most of it is",
+    "  in. The JSON keys stay as given."
   ],
   "line": "[{time}] {speaker}: {text}",
   "line_without_speaker": "[{time}] {text}",

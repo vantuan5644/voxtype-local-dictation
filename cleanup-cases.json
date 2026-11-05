@@ -89,6 +89,27 @@
       "raw": "the tail scale serve config on port four four three keeps getting reset",
       "cleaned": "The Tailscale serve config on port 443 keeps getting reset.",
       "expect": "The Tailscale serve config on port 443 keeps getting reset."
+    },
+    {
+      "name": "Vietnamese cleanup accepted",
+      "link": "local",
+      "raw": "ừ thì tôi cần cái này ờ nó phải chạy trên máy chủ mới bạn biết đấy",
+      "cleaned": "Tôi cần cái này, nó phải chạy trên máy chủ mới.",
+      "expect": "Tôi cần cái này, nó phải chạy trên máy chủ mới."
+    },
+    {
+      "name": "translation rejected",
+      "link": "pi",
+      "raw": "ừ thì tôi cần cái này ờ nó phải chạy trên máy chủ mới bạn biết đấy",
+      "cleaned": "I need this, it has to run on the new server.",
+      "expect": "ừ thì tôi cần cái này ờ nó phải chạy trên máy chủ mới bạn biết đấy"
+    },
+    {
+      "name": "Vietnamese words matched whatever their case",
+      "link": "local",
+      "raw": "được rồi khởi động lại máy chủ đó đi",
+      "cleaned": "Được rồi, khởi động lại máy chủ đó đi.",
+      "expect": "Được rồi, khởi động lại máy chủ đó đi."
     }
   ]
 }

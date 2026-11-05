@@ -929,20 +929,24 @@ fi
 # which this guard would have rejected. Excluding disfluency fragments from the
 # denominator takes that to 5/5 while leaving the real failure untouched: the
 # "Reverse a string." collapse still scores 1/9.
-kept=$(printf '%s' "$text" | awk -v out="$(printf '%s' "$cleaned" | tr '[:upper:]' '[:lower:]')" \
-    -v fillers="$FILLERS" -v minlen="$CONTENT_LENGTH" -v needed="$CONTENT_NEEDED" '
-  BEGIN {
-    split(fillers, f, " ")
-    for (i in f) filler[f[i]] = 1
-  }
-  { raw = raw " " tolower($0) }
-  END {
-    n = split(raw, a, /[^a-z0-9]+/)
-    for (i = 1; i <= n; i++)
-      if (length(a[i]) >= minlen + 0 && !(a[i] in filler)) { total++; if (index(out, a[i])) kept++ }
-    if (total < needed + 0) { print 100; exit }
-    print int(kept * 100 / total)
-  }')
+#
+# A word is a run of letters or digits in any script, matched without regard to
+# case, as the other ports count them. That is jq's regex (Oniguruma), not awk's:
+# awk's `[^a-z0-9]` cut Vietnamese apart at every diacritic, which left a
+# Vietnamese dictation too few words of four letters for this guard to run, so
+# an English translation of it passed; mawk and the BSD awk know no UTF-8 at
+# all, and `tr` lowers bytes. Lengths are
+# in characters. A jq that fails leaves `kept` empty, the test below fails, and
+# the raw text is typed.
+kept=$(jq -rn --arg raw "$text" --arg out "$cleaned" --arg fillers "$FILLERS" \
+    --argjson minlen "$CONTENT_LENGTH" --argjson needed "$CONTENT_NEEDED" '
+  ($fillers | split(" ") | map(select(. != ""))) as $f
+  | [$raw | scan("[\\p{L}\\p{N}]+")
+     | select(length >= $minlen)
+     | select(. as $w | $f | any(. as $x | $w | test("^" + $x + "$"; "i")) | not)] as $words
+  | if ($words | length) < $needed then 100
+    else ([$words[] | select(. as $w | $out | test($w; "i"))] | length) * 100 / ($words | length) | floor
+    end')
 (( kept >= KEEP_WORDS )) || passthrough "$text" "$BACKEND: the answer lost words"
 
 # GUARD 4 -- it invented words. Guard 3 only ever asked whether the speaker's

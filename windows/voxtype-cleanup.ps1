@@ -612,8 +612,10 @@ function Get-AcceptedCandidate {
         return $null
     }
 
-    $outputLower = $value.ToLowerInvariant()
-    $content = [regex]::Matches($Raw.ToLowerInvariant(), '[a-z0-9]+') |
+    # A word is a run of letters or digits in any script, compared precomposed and lowercased,
+    # as the other ports count them, so a translation of a Vietnamese dictation loses its words.
+    $outputLower = $value.Normalize().ToLowerInvariant()
+    $content = [regex]::Matches($Raw.Normalize().ToLowerInvariant(), '[\p{L}\p{N}]+') |
         ForEach-Object { $_.Value } |
         Where-Object { $_.Length -ge $rules.ContentWordLength -and -not $rules.Fillers.ContainsKey($_) }
     if (@($content).Count -ge $rules.ContentWordsNeeded) {

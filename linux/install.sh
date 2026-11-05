@@ -359,7 +359,7 @@ else
     (( $(awk -F", " '{print NF}' <<<"$VOXTYPE_MISHEARD") <= 40 )) ||
       warn "[misheard] is over 40 terms; move the ones whisper only mis-SPELLS to [misspelled]"
     pairs=( hotkey.enabled=true hotkey.key=RIGHTALT hotkey.mode=push_to_talk
-            whisper.language=en text.filter_filler_words=true
+            text.filter_filler_words=true
             vad.enabled=true vad.backend=whisper
             meeting.enabled=true
             audio.pause_media=false audio.duck_media=true
@@ -369,6 +369,9 @@ else
             "output.post_process.command=$BIN/voxtype-cleanup"
             "output.pre_output_command=$BIN/voxtype-ime-hold begin"
             "output.post_output_command=$BIN/voxtype-ime-hold end" )
+    # English, until Libre keeps the vocabulary: from then on its Settings > Languages sets
+    # the language dictation listens for, and a re-run must not put English back.
+    [[ -e $CONF_DIR/vocabulary.libre ]] || pairs+=( whisper.language=en )
     # An unreadable or empty vocabulary file must not blank the prompt whisper
     # is already using: say so and leave the key at whatever it holds.
     if [[ -n $VOXTYPE_MISHEARD ]]; then
