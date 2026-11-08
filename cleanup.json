@@ -11,8 +11,36 @@
     "Qwen3.8-Flash with thinking off, never thinks and never uses it. The anthropic link (Claude",
     "Haiku 5.5 on the user's own key) sends no temperature or top_p, which that model refuses at",
     "any value but its default, and no thinking room, since its thinking is off. The cerebras",
-    "link (qwen-3.8-27b on the user's own key) sends Groq's request with reasoning_effort none."
+    "link (qwen-3.8-27b on the user's own key) sends Groq's request with reasoning_effort none.",
+    "models lists, for each hosted link, the models Settings offers on every port, the first",
+    "being the default (DECISIONS.md, Every hosted text provider's model is chosen in Settings).",
+    "Each port tunes the request per model: a gpt-oss model reasons at low, since it refuses none."
   ],
+  "models": {
+    "anthropic": [
+      {"id": "claude-haiku-5-5", "name": "Claude Haiku 5.5"},
+      {"id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5"},
+      {"id": "claude-opus-5-5", "name": "Claude Opus 5.5"}
+    ],
+    "openai": [
+      {"id": "gpt-6-luna", "name": "GPT-6 Luna"},
+      {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol"}
+    ],
+    "groq": [
+      {"id": "openai/gpt-oss-20b", "name": "GPT OSS 20B"},
+      {"id": "openai/gpt-oss-120b", "name": "GPT OSS 120B"}
+    ],
+    "opencode": [
+      {"id": "qwen3.8-flash", "name": "Qwen3.8 Flash"},
+      {"id": "qwen3.7-plus", "name": "Qwen3.7 Plus"},
+      {"id": "qwen3.8-max", "name": "Qwen3.8 Max"},
+      {"id": "minimax-m3", "name": "MiniMax M3"}
+    ],
+    "cerebras": [
+      {"id": "qwen-3.8-27b", "name": "Qwen 3.8 27B"},
+      {"id": "gpt-oss-120b", "name": "GPT OSS 120B"}
+    ]
+  },
   "instructions": [
     "You are a dictation post-processor. Every user message is a raw",
     "speech-to-text transcription, English or Vietnamese, wrapped in <transcript>",

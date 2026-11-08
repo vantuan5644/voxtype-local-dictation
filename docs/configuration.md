@@ -90,6 +90,11 @@ port reads too, and without that file `local`.
 | `openai` | OpenAI Responses (`gpt-6-luna` by default), storage disabled, with the shared cleanup prompt and guards | OpenAI API billing; text leaves the machine |
 | `off` | passthrough | ~0 ms |
 
+Each hosted backend's model can be changed with its `VOXTYPE_CLEANUP_<BACKEND>_MODEL` below.
+`models` in `cleanup.json` lists the ones apps built on these rules offer for each backend, the
+first being the default; a `gpt-oss` model is sent `reasoning_effort: "low"` on `groq` and
+`cerebras`, and every Claude model gets the `anthropic` request above.
+
 The fallback is **always the raw text**. Falling back from a 5 s local timeout
 to a 20 s cloud call would re-import the latency the local backend exists to
 remove.
@@ -126,7 +131,7 @@ this machine.
 | `VOXTYPE_CLEANUP_MODEL` | `haiku` / `gpt-4o-mini` | cloud model name |
 | `VOXTYPE_CLEANUP_API_KEY` | — | explicit bearer-token override for the `openai` backend |
 | `VOXTYPE_CLEANUP_OPENAI_KEY_FILE` | — | path to the OpenAI key saved by Libre; read in place, key never passed in arguments |
-| `VOXTYPE_CLEANUP_OPENAI_MODEL` | `gpt-6-luna` | OpenAI cleanup model; Libre also offers `gpt-6.1-sol` |
+| `VOXTYPE_CLEANUP_OPENAI_MODEL` | `gpt-6-luna` | OpenAI cleanup model; `gpt-6.1-sol` reasons at low |
 | `VOXTYPE_CLEANUP_CODEX_PROFILE` | `luna` | codex profile |
 | `VOXTYPE_CLEANUP_OPENCODE_KEY` | pi's `opencode-go` key | OpenCode Go key; else read in place from `${PI_CODING_AGENT_DIR:-~/.pi/agent}/auth.json` |
 | `VOXTYPE_CLEANUP_OPENCODE_MODEL` | `qwen3.8-flash` | OpenCode Go model; it must have a thinking off |
